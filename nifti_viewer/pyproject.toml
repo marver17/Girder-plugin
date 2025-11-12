@@ -1,0 +1,55 @@
+[build-system]
+requires = ["setuptools>=45", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "girder-nifti-viewer"
+version = "1.0.0"
+description = "View NIfTI neuroimaging files in the browser with VTK.js"
+readme = "README.md"
+requires-python = ">=3.8"
+license = {text = "Apache Software License 2.0"}
+authors = [
+    {name = "Your Organization", email = "contact@example.com"}
+]
+keywords = ["girder", "nifti", "neuroimaging", "medical imaging", "visualization"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Web Environment",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+]
+
+dependencies = [
+    "girder>=4.0.0",
+    "nibabel>=4.0.0",
+    "numpy>=1.20.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+    "pytest-girder>=3.1.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/yourorg/girder-nifti-viewer"
+Documentation = "https://github.com/yourorg/girder-nifti-viewer/blob/main/README.md"
+Repository = "https://github.com/yourorg/girder-nifti-viewer"
+"Bug Tracker" = "https://github.com/yourorg/girder-nifti-viewer/issues"
+
+[project.entry-points."girder.plugin"]
+nifti_viewer = "girder_nifti_viewer:NiftiViewerPlugin"
+
+[tool.setuptools]
+packages = ["girder_nifti_viewer"]
+zip-safe = false
+
+[tool.setuptools.package-data]
+girder_nifti_viewer = ["web_client/**/*"]

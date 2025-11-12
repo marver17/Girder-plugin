@@ -1,0 +1,50 @@
+.g-nifti-viewer
+  .g-nifti-viewer-header
+    h4
+      i.icon-brain
+      | NIfTI Viewer
+    .g-nifti-file-info
+      if nifti.files && nifti.files.length > 0
+        span.g-nifti-file-name
+          i.icon-doc
+          |  #{nifti.files[0].name}
+        if nifti.files.length > 1
+          span.g-nifti-json-badge(title="Additional files available")
+            i.icon-doc-text
+            |  + #{nifti.files.length - 1} file(s)
+
+  .g-nifti-error-message(style="display:none;")
+
+  .g-nifti-controls
+    .g-nifti-controls-row
+      .g-nifti-orientation-btns
+        button.g-nifti-orientation-btn.active(data-orientation="axial") Axial
+        button.g-nifti-orientation-btn(data-orientation="coronal") Coronal
+        button.g-nifti-orientation-btn(data-orientation="sagittal") Sagittal
+      
+      .g-nifti-slice-control
+        span.g-nifti-slice-label Slice: 0
+        input.g-nifti-slice-slider(type="range", min="0", max="100", value="0")
+      
+      button.g-nifti-reset-view
+        i.icon-arrows-ccw
+        |  Reset
+    
+    .g-nifti-controls-row
+      .g-nifti-window-control
+        label(for="window-level") Level:
+        input#window-level.g-nifti-window-level(type="range", min="-1000", max="3000", value="500")
+        span.g-nifti-window-value.g-nifti-level-value 500
+      
+      .g-nifti-window-control
+        label(for="window-width") Width:
+        input#window-width.g-nifti-window-width(type="range", min="1", max="4000", value="2000")
+        span.g-nifti-window-value.g-nifti-width-value 2000
+      
+      button.g-nifti-auto-window
+        i.icon-flash
+        |  Auto W/L
+
+  .g-nifti-viewer-container
+
+  .g-nifti-metadata-container

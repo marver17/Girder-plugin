@@ -1,0 +1,26 @@
+{
+  "name": "@girder/nifti_viewer",
+  "version": "1.0.0",
+  "description": "NIfTI viewer plugin for Girder",
+  "license": "Apache-2.0",
+  "main": "./dist/main.js",
+  "scripts": {
+    "build": "vite build",
+    "watch": "vite build --watch"
+  },
+  "dependencies": {
+    "@girder/core": "*",
+    "nifti-reader-js": "^0.8.0",
+    "pako": "^2.1.0"
+  },
+  "devDependencies": {
+    "@types/node": "^18.0.0",
+    "pug": "^2.0.4",
+    "stylus": "^0.59.0",
+    "typescript": "^5.0.0",
+    "vite": "^4.0.0"
+  },
+  "girder": {
+    "plugin": true
+  }
+}

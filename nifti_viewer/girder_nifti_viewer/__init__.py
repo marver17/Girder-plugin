@@ -1,0 +1,391 @@
+import datetime
+import json
+import io
+from pathlib import Path
+
+import nibabel as nib
+import numpy as np
+
+from girder import events
+from girder.api import access
+from girder.api.describe import Description, autoDescribeRoute
+from girder.api.rest import Resource
+from girder.constants import AccessType, TokenScope
+from girder.exceptions import RestException
+from girder.plugin import GirderPlugin, registerPluginStaticContent
+from girder.models.item import Item
+from girder.models.file import File
+from girder.utility import search
+
+
+class NiftiViewerPlugin(GirderPlugin):
+    DISPLAY_NAME = 'NIfTI Viewer'
+    CLIENT_SOURCE_PATH = 'web_client'
+
+    def load(self, info):
+        # Expose the 'nifti' field on items
+        Item().exposeFields(level=AccessType.READ, fields={'nifti'})
+        
+        # Bind event handler for automatic parsing on upload
+        events.bind('data.process', 'nifti_viewer', _uploadHandler)
+
+        # Add NIfTI search mode
+        search.addSearchMode('nifti', niftiSubstringSearchHandler)
+
+        # Register REST endpoints
+        niftiItem = NiftiItem()
+        info['apiRoot'].item.route(
+            'POST', (':id', 'parseNifti'), niftiItem.makeNiftiItem)
+
+        # Register static content (JavaScript and CSS)
+        registerPluginStaticContent(
+            plugin='nifti_viewer',
+            css=['/style.css'],
+            js=['/girder-plugin-nifti-viewer.umd.cjs'],
+            staticDir=Path(__file__).parent / 'web_client' / 'dist',
+            tree=info['serverRoot'],
+        )
+
+
+class NiftiItem(Resource):
+
+    @access.user(scope=TokenScope.DATA_READ)
+    @autoDescribeRoute(
+        Description('Parse NIfTI files and extract metadata from NIfTI header and optional JSON sidecar')
+        .modelParam('id', 'The item ID',
+                    model='item', level=AccessType.WRITE, paramType='path')
+        .errorResponse('ID was invalid.')
+        .errorResponse('Write permission denied on the item.', 403)
+    )
+    def makeNiftiItem(self, item):
+        """
+        Convert an existing item into a "NIfTI item", which contains
+        extracted metadata from NIfTI header and optional JSON sidecar files.
+        """
+        niftiFile = None
+        jsonFile = None
+        
+        # Find NIfTI and JSON files in the item
+        for file in Item().childFiles(item):
+            name = file['name'].lower()
+            if name.endswith('.nii') or name.endswith('.nii.gz'):
+                niftiFile = file
+            elif name.endswith('.json'):
+                jsonFile = file
+        
+        if not niftiFile:
+            # No NIfTI file found, just return the item unchanged
+            return item
+        
+        # Parse NIfTI header metadata
+        try:
+            niftiMeta = _parseNiftiFile(niftiFile)
+        except Exception as e:
+            raise RestException(f'Failed to parse NIfTI file: {str(e)}')
+        
+        # Parse JSON metadata if present (optional)
+        jsonMeta = {}
+        if jsonFile:
+            try:
+                jsonMeta = _parseJsonFile(jsonFile)
+            except Exception as e:
+                # JSON parsing is optional, log warning but continue
+                print(f'Warning: Failed to parse JSON file: {str(e)}')
+        
+        # Combine metadata
+        combinedMeta = {**niftiMeta}
+        if jsonMeta:
+            combinedMeta['json_metadata'] = jsonMeta
+        
+        # Build files array (JavaScript expects an array, not an object)
+        files = [_extractFileData(niftiFile)]
+        if jsonFile:
+            files.append(_extractFileData(jsonFile))
+        
+        # Store in the item
+        item['nifti'] = {
+            'meta': combinedMeta,
+            'files': files
+        }
+        
+        # Save the item
+        return Item().save(item)
+
+
+def _parseNiftiFile(file):
+    """
+    Extract metadata from NIfTI file header using nibabel.
+    Supports both compressed (.nii.gz) and uncompressed (.nii) files.
+    
+    :param file: Girder file document
+    :returns: Dictionary with NIfTI metadata
+    """
+    import tempfile
+    import shutil
+    import os
+    
+    # Determine the correct file extension based on the original file name
+    filename = file['name'].lower()
+    if filename.endswith('.nii.gz'):
+        suffix = '.nii.gz'
+    elif filename.endswith('.nii'):
+        suffix = '.nii'
+    else:
+        # Fallback - try both extensions
+        suffix = '.nii.gz'
+    
+    # Save to temporary file (nibabel needs a file path)
+    # Use streaming to avoid loading entire file in memory
+    with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
+        tmp_path = tmp.name
+        with File().open(file) as f:
+            # Stream the file in chunks to avoid memory issues
+            shutil.copyfileobj(f, tmp, length=1024*1024)  # 1MB chunks
+        # Ensure all data is written to disk before reading
+        tmp.flush()
+    
+    try:
+        # Load with nibabel
+        img = nib.load(tmp_path)
+        header = img.header
+        
+        # Extract key metadata
+        # Use field names that match frontend expectations
+        dims = list(header.get_data_shape())
+        pixdim = [float(x) for x in header.get_zooms()]
+
+        meta = {
+            # Frontend-compatible field names
+            'dimensions': dims,  # Frontend expects 'dimensions'
+            'pixelSpacing': pixdim,  # Frontend expects 'pixelSpacing'
+            'dataType': str(header.get_data_dtype()),  # Frontend expects 'dataType'
+            'units': _get_space_units(header),  # Frontend expects just the string
+
+            # Keep legacy field names for backward compatibility
+            'dims': dims,
+            'pixdim': pixdim,
+            'datatype': str(header.get_data_dtype()),
+
+            # Additional metadata
+            'qform_code': int(header['qform_code']),
+            'sform_code': int(header['sform_code']),
+            'time_units': _get_time_units(header),
+            'file_type': 'NIfTI-1' if header['sizeof_hdr'] == 348 else 'NIfTI-2',
+        }
+        
+        # Add orientation if available
+        try:
+            orientation = nib.aff2axcodes(img.affine)
+            meta['orientation'] = ''.join(orientation)
+        except Exception:
+            meta['orientation'] = 'Unknown'
+
+        # Add affine matrix
+        try:
+            meta['affine'] = img.affine.tolist()
+        except Exception:
+            meta['affine'] = None
+
+        # Add voxel volume (frontend expects 'voxelSize')
+        try:
+            voxel_volume = np.prod(header.get_zooms()[:3])
+            meta['voxelSize'] = float(voxel_volume)  # Frontend field name
+            meta['voxel_volume'] = float(voxel_volume)  # Legacy field name
+        except Exception:
+            meta['voxelSize'] = None
+            meta['voxel_volume'] = None
+
+        # Add image size in bytes (frontend expects 'imageSize')
+        try:
+            # Calculate total image size (dimensions × bytes per voxel)
+            bytes_per_voxel = header.get_data_dtype().itemsize
+            total_voxels = np.prod(dims)
+            image_size_bytes = total_voxels * bytes_per_voxel
+            # Frontend expects [width, height, depth] format
+            meta['imageSize'] = dims  # Same as dimensions for 3D images
+        except Exception:
+            meta['imageSize'] = dims
+
+        return meta
+    finally:
+        # Clean up temporary file
+        try:
+            os.unlink(tmp_path)
+        except Exception:
+            pass
+
+
+def _get_space_units(header):
+    """Get spatial units from NIfTI header."""
+    units_dict = {
+        0: 'unknown',
+        1: 'meter',
+        2: 'mm',
+        3: 'micron'
+    }
+    try:
+        unit_code = header.get_xyzt_units()[0]
+        return units_dict.get(unit_code, 'unknown')
+    except Exception:
+        return 'unknown'
+
+
+def _get_time_units(header):
+    """Get temporal units from NIfTI header."""
+    units_dict = {
+        0: 'unknown',
+        8: 'sec',
+        16: 'msec',
+        24: 'usec',
+        32: 'Hz',
+        40: 'ppm',
+        48: 'rads'
+    }
+    try:
+        unit_code = header.get_xyzt_units()[1]
+        return units_dict.get(unit_code, 'unknown')
+    except Exception:
+        return 'unknown'
+
+
+def _parseJsonFile(file):
+    """
+    Parse JSON sidecar file (e.g., BIDS-style metadata).
+    
+    :param file: Girder file document
+    :returns: Dictionary with JSON content
+    """
+    with File().open(file) as f:
+        content = f.read()
+        if isinstance(content, bytes):
+            content = content.decode('utf-8')
+        return json.loads(content)
+
+
+def _extractFileData(file):
+    """
+    Extract basic file information.
+    
+    :param file: Girder file document
+    :returns: Dictionary with file metadata
+    """
+    return {
+        'id': str(file['_id']),
+        'name': file['name'],
+        'size': file['size'],
+        'created': file.get('created', datetime.datetime.utcnow()).isoformat()
+    }
+
+
+def _uploadHandler(event):
+    """
+    Event handler to automatically parse NIfTI files on upload.
+    """
+    import logging
+    logger = logging.getLogger('girder.plugins.nifti_viewer')
+    
+    logger.info('=== NIfTI Upload Handler Called ===')
+    logger.info(f'Event info keys: {list(event.info.keys())}')
+    
+    file = event.info.get('file')
+    if not file:
+        logger.warning('No file in event.info')
+        return
+    
+    name = file.get('name', '').lower()
+    logger.info(f'File name: {name}')
+    
+    # Check if it's a NIfTI file
+    if name.endswith('.nii') or name.endswith('.nii.gz'):
+        logger.info(f'Processing NIfTI file: {name}')
+        try:
+            # Parse the NIfTI file
+            logger.info('Parsing NIfTI file...')
+            fileMetadata = _parseNiftiFile(file)
+            if fileMetadata is None:
+                logger.warning('Failed to parse NIfTI file')
+                return
+            
+            logger.info(f'Parsed metadata: {list(fileMetadata.keys())}')
+            
+            item = Item().load(file['itemId'], force=True)
+            if not item:
+                logger.warning('Failed to load item')
+                return
+            
+            logger.info(f'Loaded item: {item["_id"]}')
+            
+            # Check for JSON sidecar
+            jsonMetadata = None
+            itemFiles = list(File().find({'itemId': item['_id']}))
+            logger.info(f'Found {len(itemFiles)} files in item')
+            for itemFile in itemFiles:
+                if itemFile['name'].endswith('.json'):
+                    logger.info(f'Found JSON sidecar: {itemFile["name"]}')
+                    jsonMetadata = _parseJsonFile(itemFile)
+                    break
+            
+            # Update or create nifti metadata in item
+            if 'nifti' in item:
+                logger.info('Updating existing nifti metadata')
+                # Update existing metadata
+                item['nifti']['meta'].update(fileMetadata)
+                if jsonMetadata:
+                    item['nifti']['meta'].update(jsonMetadata)
+            else:
+                logger.info('Creating new nifti metadata')
+                # Create new metadata
+                item['nifti'] = {
+                    'meta': fileMetadata,
+                    'files': []
+                }
+                if jsonMetadata:
+                    item['nifti']['meta'].update(jsonMetadata)
+            
+            # Add file info
+            fileInfo = _extractFileData(file)
+            item['nifti']['files'].append(fileInfo)
+            
+            logger.info('Saving item with nifti metadata')
+            Item().save(item)
+            logger.info('=== NIfTI Upload Handler Completed Successfully ===')
+        except Exception as e:
+            logger.error(f'Error auto-parsing NIfTI file: {str(e)}', exc_info=True)
+    else:
+        logger.info(f'Not a NIfTI file, skipping: {name}')
+
+
+def niftiSubstringSearchHandler(query, types, user=None, level=None, limit=0, offset=0):
+    """
+    Search handler for NIfTI items.
+    Search in NIfTI metadata fields.
+    """
+    if 'item' not in types:
+        return []
+    
+    # Build MongoDB query
+    search_query = {
+        'nifti': {'$exists': True},
+        '$or': [
+            {'nifti.meta.orientation': {'$regex': query, '$options': 'i'}},
+            {'nifti.meta.datatype': {'$regex': query, '$options': 'i'}},
+            {'nifti.files.nifti.name': {'$regex': query, '$options': 'i'}},
+        ]
+    }
+    
+    # Execute search
+    items = Item().findWithPermissions(
+        search_query,
+        user=user,
+        level=level,
+        limit=limit,
+        offset=offset
+    )
+    
+    return [
+        {
+            'type': 'item',
+            'document': item
+        }
+        for item in items
+    ]

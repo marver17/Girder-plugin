@@ -22,3 +22,6 @@ Plugin per l'autenticazione OAuth2 con supporto per molteplici provider di ident
 - Python 3.8+
 - Dipendenze specifiche per ogni plugin 
 
+##TODO
+TODO risolvere problemi orientamento nifti-viewer 
+TODO adattare il nifti viewer ad essere simile a dicom-viewer vecchie

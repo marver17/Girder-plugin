@@ -1,0 +1,84 @@
+services:
+  # MongoDB per Girder
+  mongodb:
+    image: mongo:4.4
+    container_name: girder-dev-mongodb
+    networks:
+      - girder-dev-net
+    volumes:
+      - mongodb_data:/data/db
+    environment:
+      - MONGO_INITDB_DATABASE=girder
+    restart: unless-stopped
+    ports:
+      - "27017:27017"
+    healthcheck:
+      test: ["CMD", "mongo", "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  # Redis per caching e sessioni
+  redis:
+    image: redis:7-alpine
+    container_name: girder-dev-redis
+    networks:
+      - girder-dev-net
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+
+  # Girder Development
+  girder:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: girder-dev
+    networks:
+      - girder-dev-net
+    depends_on:
+      mongodb:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      - GIRDER_MONGO_URI=mongodb://mongodb:27017/girder
+      - GIRDER_REDIS_URL=redis://redis:6379
+      - PYTHONUNBUFFERED=1
+    volumes:
+      - .:/workspace
+      - ./oauth2:/girder/oauth2
+      - girder_data:/home/girder/.local
+      - girder_node_modules:/girder/girder/web/node_modules
+    ports:
+      - "8080:8080"
+    stdin_open: true
+    tty: true
+    user: girder
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/api/v1/system/version"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+
+networks:
+  girder-dev-net:
+    driver: bridge
+    name: girder-dev-network
+
+volumes:
+  mongodb_data:
+    name: girder-dev-mongodb
+  girder_data:
+    name: girder-dev-data
+  girder_node_modules:
+    name: girder-dev-node-modules

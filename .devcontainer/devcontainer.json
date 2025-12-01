@@ -1,0 +1,77 @@
+{
+  "name": "Girder 5 Development",
+  "dockerComposeFile": "../docker-compose.yml",
+  "service": "girder",
+  "workspaceFolder": "/workspace",
+
+  // Configurazione per eseguire come utente non-root
+  "remoteUser": "girder",
+  "containerUser": "girder",
+
+  // Porte da esporre
+  "forwardPorts": [8080, 27017, 6379],
+  "portsAttributes": {
+    "8080": {
+      "label": "Girder Server",
+      "onAutoForward": "notify"
+    },
+    "27017": {
+      "label": "MongoDB",
+      "onAutoForward": "silent"
+    },
+    "6379": {
+      "label": "Redis",
+      "onAutoForward": "silent"
+    }
+  },
+
+  // Estensioni VSCode utili per lo sviluppo Python/JavaScript
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "ms-python.python",
+        "ms-python.vscode-pylance",
+        "ms-python.black-formatter",
+        "ms-python.isort",
+        "dbaeumer.vscode-eslint",
+        "esbenp.prettier-vscode",
+        "redhat.vscode-yaml",
+        "mongodb.mongodb-vscode"
+      ],
+      "settings": {
+        "python.defaultInterpreterPath": "/usr/bin/python3",
+        "python.linting.enabled": true,
+        "python.linting.pylintEnabled": false,
+        "python.linting.flake8Enabled": true,
+        "python.formatting.provider": "black",
+        "editor.formatOnSave": true,
+        "[python]": {
+          "editor.defaultFormatter": "ms-python.black-formatter",
+          "editor.codeActionsOnSave": {
+            "source.organizeImports": "explicit"
+          }
+        }
+      }
+    }
+  },
+
+  // Comando da eseguire dopo la creazione del container
+  "postCreateCommand": "echo 'Dev container ready!\n\nServizi disponibili:\n- MongoDB: mongodb://mongodb:27017/girder\n- Redis: redis://redis:6379\n\nPer avviare Girder:\ngirder serve --host 0.0.0.0 --database mongodb://mongodb:27017/girder\n\nOppure usa: /usr/local/bin/start-girder.sh'",
+
+  // Feature aggiuntive
+  "features": {
+    "ghcr.io/devcontainers/features/git:1": {},
+    "ghcr.io/devcontainers/features/common-utils:2": {
+      "installZsh": true,
+      "installOhMyZsh": true,
+      "username": "girder"
+    }
+  },
+
+  // Variabili d'ambiente
+  "remoteEnv": {
+    "PYTHONUNBUFFERED": "1",
+    "GIRDER_MONGO_URI": "mongodb://mongodb:27017/girder",
+    "GIRDER_REDIS_URL": "redis://redis:6379"
+  }
+}

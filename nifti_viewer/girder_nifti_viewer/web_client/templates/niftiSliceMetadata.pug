@@ -1,54 +1,10 @@
-.g-nifti-metadata
-  h5.g-nifti-metadata-title
-    i.icon-info-circled
-    |  NIfTI Metadata
-
-  .g-nifti-metadata-grid
-    .g-nifti-metadata-section
-      h6.g-nifti-section-title
-        i.icon-picture
-        |  Image Dimensions
-      table.g-nifti-metadata-table
-        tbody
-          tr
-            td.g-nifti-meta-label Dimensions
-            td.g-nifti-meta-value #{metadata.dims.join(' × ')}
-          tr
-            td.g-nifti-meta-label Voxel Size
-            - var units = metadata.units && metadata.units.space !== 'unknown' ? metadata.units.space : 'mm'
-            td.g-nifti-meta-value #{metadata.pixdim.map(v => v.toFixed(2)).join(' × ')} #{units}
-          if metadata.voxel_volume
-            tr
-              td.g-nifti-meta-label Voxel Volume
-              td.g-nifti-meta-value #{metadata.voxel_volume.toFixed(4)} #{units}³
-
-    .g-nifti-metadata-section
-      h6.g-nifti-section-title
-        i.icon-database
-        |  Data Properties
-      table.g-nifti-metadata-table
-        tbody
-          tr
-            td.g-nifti-meta-label Data Type
-            td.g-nifti-meta-value
-              span.g-nifti-badge.g-nifti-badge-primary #{metadata.datatype}
-          tr
-            td.g-nifti-meta-label Orientation
-            td.g-nifti-meta-value
-              span.g-nifti-badge.g-nifti-badge-success #{metadata.orientation}
-          tr
-            td.g-nifti-meta-label File Type
-            td.g-nifti-meta-value #{metadata.file_type}
-
-    .g-nifti-metadata-section
-      h6.g-nifti-section-title
-        i.icon-globe
-        |  Coordinate Systems
-      table.g-nifti-metadata-table
-        tbody
-          tr
-            td.g-nifti-meta-label QForm Code
-            td.g-nifti-meta-value #{metadata.qform_code}
-          tr
-            td.g-nifti-meta-label SForm Code
-            td.g-nifti-meta-value #{metadata.sform_code}
+//- NIfTI Metadata template (simile a DICOM tags)
+if tags && tags.length > 0
+  table.table.table-condensed.g-nifti-metadata-table
+    tbody
+      each tag in tags
+        tr
+          td.g-nifti-tag-name= tag.name
+          td.g-nifti-tag-value= tag.value
+else
+  p.text-muted Loading metadata...

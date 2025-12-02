@@ -1,536 +1,387 @@
 import View from '@girder/core/views/View';
-import { restRequest } from '@girder/core/rest';
-import * as nifti from 'nifti-reader-js';
-import pako from 'pako';
+import { restRequest, getApiRoot } from '@girder/core/rest';
+
+import NiftiSliceImageWidget from './NiftiSliceImageWidget';
 
 import NiftiItemTemplate from '../templates/niftiItem.pug';
 import '../stylesheets/niftiItem.styl';
 import NiftiSliceMetadataTemplate from '../templates/niftiSliceMetadata.pug';
 import '../stylesheets/niftiSliceMetadata.styl';
 
+// Simple debounce function to avoid underscore dependency issues
+function debounce(func, wait) {
+    let timeout;
+    return function (...args) {
+        clearTimeout(timeout);
+        timeout = setTimeout(() => func.apply(this, args), wait);
+    };
+}
+
+/**
+ * Widget to display NIfTI metadata (similar to DICOM tags)
+ */
 const NiftiSliceMetadataWidget = View.extend({
-    className: 'g-nifti-metadata',
+    className: 'g-nifti-tags',
 
     initialize: function (settings) {
-        this._niftiData = settings.niftiData || {};
+        this._metadata = null;
+        this._volumeInfo = null;
+        this._jsonMetadata = null;
     },
 
     setMetadata: function (metadata) {
-        this._niftiData = metadata;
+        this._metadata = metadata;
+        return this;
+    },
+
+    setVolumeInfo: function (volumeInfo) {
+        this._volumeInfo = volumeInfo;
+        return this;
+    },
+
+    setJsonMetadata: function (jsonMetadata) {
+        this._jsonMetadata = jsonMetadata;
         return this;
     },
 
     render: function () {
-        this.$el.html(NiftiSliceMetadataTemplate({
-            metadata: this._niftiData
-        }));
+        const tags = this._buildTagList();
+        this.$el.html(NiftiSliceMetadataTemplate({ tags }));
         return this;
+    },
+
+    _buildTagList: function () {
+        const tags = [];
+
+        // Add NIfTI header info
+        if (this._volumeInfo) {
+            const vi = this._volumeInfo;
+            
+            if (vi.dims) {
+                tags.push({ name: 'Dimensions', value: vi.dims.slice(1, 4).join(' × ') });
+            }
+            if (vi.pixDims) {
+                tags.push({ name: 'Voxel Size (mm)', value: vi.pixDims.slice(1, 4).map(v => v.toFixed(2)).join(' × ') });
+            }
+            if (vi.maxSlices) {
+                tags.push({ name: 'Axial Slices', value: vi.maxSlices.axial });
+                tags.push({ name: 'Coronal Slices', value: vi.maxSlices.coronal });
+                tags.push({ name: 'Sagittal Slices', value: vi.maxSlices.sagittal });
+            }
+            if (vi.global_min !== undefined && vi.global_max !== undefined) {
+                tags.push({ name: 'Intensity Range', value: `${vi.global_min.toFixed(2)} - ${vi.global_max.toFixed(2)}` });
+            }
+        }
+
+        // Add metadata from Girder item
+        if (this._metadata) {
+            for (const [key, value] of Object.entries(this._metadata)) {
+                if (typeof value === 'object') continue;
+                tags.push({ name: key, value: String(value) });
+            }
+        }
+
+        // Add JSON sidecar metadata (BIDS format)
+        if (this._jsonMetadata) {
+            tags.push({ name: '--- JSON Metadata ---', value: '' });
+            for (const [key, value] of Object.entries(this._jsonMetadata)) {
+                if (typeof value === 'object' && !Array.isArray(value)) continue;
+                let displayValue = Array.isArray(value) ? value.join(', ') : String(value);
+                if (displayValue.length > 100) displayValue = displayValue.substring(0, 100) + '...';
+                tags.push({ name: key, value: displayValue });
+            }
+        }
+
+        return tags;
     }
 });
 
+/**
+ * Main NIfTI viewer following DICOM viewer layout
+ * Left side: image viewer with controls
+ * Right side: metadata panel
+ */
 const NiftiView = View.extend({
-    className: 'g-nifti-viewer',
+    className: 'g-nifti-view',
 
     events: {
-        'change .g-nifti-orientation-btn': '_changeOrientation',
-        'click .g-nifti-orientation-btn': '_changeOrientation',
-        'input .g-nifti-slice-slider': '_changeSlice',
-        'input .g-nifti-window-level': '_changeWindowLevel',
-        'input .g-nifti-window-width': '_changeWindowWidth',
-        'click .g-nifti-reset-view': '_resetView',
-        'click .g-nifti-auto-window': '_autoWindow'
+        // Slice navigation via slider
+        'input .g-nifti-slider': '_onSliderInput',
+
+        // Navigation buttons
+        'click .g-nifti-first': '_firstSlice',
+        'click .g-nifti-previous': '_previousSlice',
+        'click .g-nifti-play': 'play',
+        'click .g-nifti-pause': 'pause',
+        'click .g-nifti-next': '_nextSlice',
+        'click .g-nifti-last': '_lastSlice',
+
+        // Zoom controls
+        'click .g-nifti-zoom-in': '_zoomIn',
+        'click .g-nifti-zoom-out': '_zoomOut',
+        'click .g-nifti-reset-zoom': '_resetZoom',
+        'click .g-nifti-auto-levels': '_autoLevels',
+
+        // Orientation buttons
+        'click .g-nifti-orientation-btn': '_changeOrientation'
     },
 
     initialize: function (settings) {
         this.item = settings.item;
         this.parentView = settings.parentView;
         this.niftiInfo = this.item.get('nifti');
-        this.niftiData = null;
-        this.niftiHeader = null;
-        this.niftiImage = null;
-        this.jsonMetadata = null;
-        this.currentOrientation = 'axial';
-        this.currentSlice = 0;
-        this.canvas = null;
-        this.ctx = null;
-        this.windowLevel = 500;
-        this.windowWidth = 2000;
-        this.dataMin = 0;
-        this.dataMax = 0;
+
+        // Volume and metadata state
+        this._volumeInfo = null;
+        this._jsonMetadata = null;
+
+        // View widgets
+        this._sliceImageWidget = null;
+        this._sliceMetadataWidget = null;
+
+        // Navigation state
+        this._currentOrientation = 'axial';
+        this._currentSlice = 0;
+        this._maxSlices = 0;
+
+        // Playback state
+        this._playing = false;
+        this._playInterval = 500;
+        this._playTimer = null;
+
+        // Create debounced slider handler
+        this._debouncedSliderHandler = debounce((sliceIndex) => {
+            this._setSlice(sliceIndex);
+        }, 10);
+    },
+
+    _onSliderInput: function (e) {
+        const sliceIndex = parseInt(e.target.value);
+        this._debouncedSliderHandler(sliceIndex);
     },
 
     render: function () {
+        // Get total files info
+        const files = this.niftiInfo.files || [];
+        
         this.$el.html(NiftiItemTemplate({
-            item: this.item,
+            files: files,
             nifti: this.niftiInfo
         }));
 
-        // Setup metadata widget
-        this.metadataWidget = new NiftiSliceMetadataWidget({
-            el: this.$('.g-nifti-metadata-container'),
-            parentView: this,
-            niftiData: this.niftiInfo.meta
+        // Initialize metadata widget
+        this._sliceMetadataWidget = new NiftiSliceMetadataWidget({
+            el: this.$('.g-nifti-tags'),
+            parentView: this
         });
-        this.metadataWidget.render();
+        this._sliceMetadataWidget
+            .setMetadata(this.niftiInfo.meta || {})
+            .render();
 
-        // Setup canvas for 2D slice visualization
-        const viewerContainer = this.$('.g-nifti-viewer-container');
-        viewerContainer.html('<canvas class="g-nifti-canvas"></canvas><div class="g-nifti-loading">Loading NIfTI file...</div>');
-        
-        this.canvas = viewerContainer.find('canvas')[0];
-        this.ctx = this.canvas.getContext('2d');
+        // Initialize image widget with Niivue
+        this._sliceImageWidget = new NiftiSliceImageWidget({
+            el: this.$('.g-nifti-image'),
+            parentView: this,
+            onVolumeLoaded: (volumeInfo) => this._onVolumeLoaded(volumeInfo)
+        });
 
-        // Load NIfTI file and JSON metadata if available
-        this._loadNiftiFile();
+        // Build URL to download NIfTI file
+        const niftiFile = this.niftiInfo.files[0];
+        const volumeUrl = `${getApiRoot()}/file/${niftiFile.id}/download`;
+        const volumeName = niftiFile.name;
+
+        this._sliceImageWidget
+            .setVolumeUrl(volumeUrl, volumeName)
+            .render();
+
+        // Load JSON sidecar if available
         this._loadJsonMetadata();
 
         return this;
     },
 
+    _onVolumeLoaded: function (volumeInfo) {
+        this._volumeInfo = volumeInfo;
+
+        // Set initial max slices for current orientation
+        this._maxSlices = volumeInfo.maxSlices[this._currentOrientation] || 1;
+        this._currentSlice = Math.floor(this._maxSlices / 2);
+
+        // Update UI controls
+        this.$('.g-nifti-slider')
+            .attr('max', this._maxSlices - 1)
+            .val(this._currentSlice);
+        this._updateSliceLabel();
+
+        // Enable controls
+        this._toggleControls(true);
+
+        // Update metadata widget with volume info
+        this._sliceMetadataWidget
+            .setVolumeInfo(volumeInfo)
+            .render();
+    },
+
     _loadJsonMetadata: function () {
-        // Check if there's a JSON file (second file in the list)
-        if (this.niftiInfo.files && this.niftiInfo.files.length > 1) {
-            const jsonFile = this.niftiInfo.files.find(f => f.name.endsWith('.json'));
-            if (jsonFile) {
-                restRequest({
-                    url: `file/${jsonFile.id}/download`,
-                    method: 'GET',
-                    error: null
-                }).done((data) => {
-                    try {
-                        this.jsonMetadata = typeof data === 'string' ? JSON.parse(data) : data;
-                        this._displayJsonMetadata();
-                    } catch (e) {
-                        console.error('Failed to parse JSON metadata:', e);
-                    }
-                });
-            }
-        }
-    },
+        // Look for JSON sidecar file
+        const jsonFile = (this.niftiInfo.files || []).find(f => 
+            f.name.endsWith('.json')
+        );
 
-    _displayJsonMetadata: function () {
-        if (this.jsonMetadata) {
-            // Extract DICOM fields
-            const dicomFields = this._extractDicomFields(this.jsonMetadata);
-            
-            if (Object.keys(dicomFields).length > 0) {
-                // Create sections based on field categories
-                const patientFields = {};
-                const studyFields = {};
-                const acquisitionFields = {};
-                const otherFields = {};
-                
-                Object.entries(dicomFields).forEach(([key, value]) => {
-                    if (key.includes('Patient')) {
-                        patientFields[key] = value;
-                    } else if (key.includes('Study')) {
-                        studyFields[key] = value;
-                    } else if (key.includes('Acquisition') || key.includes('Slice') || key.includes('Pixel') || key.includes('Orientation')) {
-                        acquisitionFields[key] = value;
-                    } else {
-                        otherFields[key] = value;
-                    }
-                });
-                
-                const jsonSection = `
-                    <div class="g-nifti-dicom-metadata">
-                        <h5 class="g-nifti-metadata-title">
-                            <i class="icon-doc-text"></i> DICOM Metadata
-                        </h5>
-                        <div class="g-nifti-metadata-grid">
-                            ${this._createMetadataSection('Patient Information', 'icon-user', patientFields)}
-                            ${this._createMetadataSection('Study Information', 'icon-folder', studyFields)}
-                            ${this._createMetadataSection('Acquisition Parameters', 'icon-cog', acquisitionFields)}
-                            ${Object.keys(otherFields).length > 0 ? this._createMetadataSection('Other Information', 'icon-info-circled', otherFields) : ''}
-                        </div>
-                    </div>
-                `;
-                
-                this.$('.g-nifti-metadata-container').append(jsonSection);
-            }
-        }
-    },
-    
-    _createMetadataSection: function (title, icon, fields) {
-        if (Object.keys(fields).length === 0) return '';
-        
-        const rows = Object.entries(fields)
-            .map(([key, value]) => `
-                <tr>
-                    <td class="g-nifti-meta-label">${key}</td>
-                    <td class="g-nifti-meta-value">${this._escapeHtml(value)}</td>
-                </tr>
-            `)
-            .join('');
-        
-        return `
-            <div class="g-nifti-metadata-section">
-                <h6 class="g-nifti-section-title">
-                    <i class="${icon}"></i> ${title}
-                </h6>
-                <table class="g-nifti-metadata-table">
-                    <tbody>
-                        ${rows}
-                    </tbody>
-                </table>
-            </div>
-        `;
-    },
-    
-    _escapeHtml: function (text) {
-        const div = document.createElement('div');
-        div.textContent = text;
-        return div.innerHTML;
-    },
-
-    _extractDicomFields: function (json) {
-        const fields = {};
-        
-        // Common DICOM tags to display
-        const commonTags = {
-            'PatientName': 'Patient Name',
-            'PatientID': 'Patient ID',
-            'PatientBirthDate': 'Birth Date',
-            'PatientSex': 'Sex',
-            'StudyDate': 'Study Date',
-            'StudyDescription': 'Study Description',
-            'SeriesDescription': 'Series Description',
-            'Modality': 'Modality',
-            'Manufacturer': 'Manufacturer',
-            'ManufacturerModelName': 'Model',
-            'SliceThickness': 'Slice Thickness',
-            'PixelSpacing': 'Pixel Spacing',
-            'ImageOrientationPatient': 'Orientation',
-            'AcquisitionDate': 'Acquisition Date',
-            'AcquisitionTime': 'Acquisition Time'
-        };
-
-        // Extract fields from JSON
-        for (const [tag, label] of Object.entries(commonTags)) {
-            if (json[tag] !== undefined) {
-                let value = json[tag];
-                // Format arrays
-                if (Array.isArray(value)) {
-                    value = value.join(', ');
+        if (jsonFile) {
+            restRequest({
+                url: `file/${jsonFile.id}/download`,
+                method: 'GET',
+                error: null
+            }).done((data) => {
+                try {
+                    this._jsonMetadata = typeof data === 'string' ? JSON.parse(data) : data;
+                    this._sliceMetadataWidget
+                        .setJsonMetadata(this._jsonMetadata)
+                        .render();
+                } catch (e) {
+                    console.error('Failed to parse JSON metadata:', e);
                 }
-                fields[label] = value;
-            }
-        }
-
-        return fields;
-    },
-
-    _loadNiftiFile: function () {
-        // Get the first file (the NIfTI file)
-        const fileId = this.niftiInfo.files[0].id;
-        
-        // Download the file as ArrayBuffer
-        restRequest({
-            url: `file/${fileId}/download`,
-            method: 'GET',
-            error: null
-        }).done((data) => {
-            this._parseNiftiData(data);
-        }).fail(() => {
-            this.$('.g-nifti-loading').html('<span class="text-danger">Failed to load NIfTI file</span>');
-        });
-    },
-
-    _parseNiftiData: function (data) {
-        try {
-            // Convert response to ArrayBuffer if needed
-            let arrayBuffer;
-            if (data instanceof ArrayBuffer) {
-                arrayBuffer = data;
-            } else if (typeof data === 'string') {
-                // If it's a string, we need to fetch it properly
-                this._loadNiftiFileAsArrayBuffer();
-                return;
-            } else {
-                arrayBuffer = data;
-            }
-
-            // Check if compressed
-            let niftiBuffer = arrayBuffer;
-            if (nifti.isCompressed(arrayBuffer)) {
-                niftiBuffer = nifti.decompress(arrayBuffer);
-            }
-
-            // Parse header
-            if (nifti.isNIFTI(niftiBuffer)) {
-                this.niftiHeader = nifti.readHeader(niftiBuffer);
-                this.niftiImage = nifti.readImage(this.niftiHeader, niftiBuffer);
-                
-                this.$('.g-nifti-loading').hide();
-                this._setupSliceViewer();
-                this._renderSlice();
-            } else {
-                this.$('.g-nifti-loading').html('<span class="text-danger">Invalid NIfTI file format</span>');
-            }
-        } catch (error) {
-            console.error('Error parsing NIfTI:', error);
-            this.$('.g-nifti-loading').html('<span class="text-danger">Error parsing NIfTI file: ' + error.message + '</span>');
-        }
-    },
-
-    _loadNiftiFileAsArrayBuffer: function () {
-        const fileId = this.niftiInfo.files[0].id;
-        
-        fetch(`/api/v1/file/${fileId}/download`)
-            .then(response => response.arrayBuffer())
-            .then(arrayBuffer => {
-                this._parseNiftiData(arrayBuffer);
-            })
-            .catch(error => {
-                console.error('Error loading NIfTI:', error);
-                this.$('.g-nifti-loading').html('<span class="text-danger">Failed to load NIfTI file</span>');
             });
+        }
     },
 
-    _setupSliceViewer: function () {
-        const dims = [this.niftiHeader.dims[1], this.niftiHeader.dims[2], this.niftiHeader.dims[3]];
-        
-        // Setup slider based on orientation
-        const maxSlice = this._getMaxSliceForOrientation();
-        this.$('.g-nifti-slice-slider').attr('max', maxSlice - 1);
-        this.currentSlice = Math.floor(maxSlice / 2);
-        this.$('.g-nifti-slice-slider').val(this.currentSlice);
+    _setSlice: function (sliceIndex) {
+        this._currentSlice = sliceIndex;
+        if (this._sliceImageWidget) {
+            this._sliceImageWidget.setSlice(sliceIndex);
+        }
         this._updateSliceLabel();
     },
 
-    _getMaxSliceForOrientation: function () {
-        switch (this.currentOrientation) {
-            case 'axial':
-                return this.niftiHeader.dims[3]; // Z dimension
-            case 'coronal':
-                return this.niftiHeader.dims[2]; // Y dimension
-            case 'sagittal':
-                return this.niftiHeader.dims[1]; // X dimension
-            default:
-                return this.niftiHeader.dims[3];
+    _updateSliceLabel: function () {
+        this.$('.g-nifti-filename').text(
+            `${this._currentOrientation.charAt(0).toUpperCase() + this._currentOrientation.slice(1)}: ${this._currentSlice + 1} / ${this._maxSlices}`
+        );
+    },
+
+    _toggleControls: function (enable) {
+        this.$('.g-nifti-controls button').girderEnable(enable);
+    },
+
+    // Navigation methods
+    _firstSlice: function () {
+        this._setSlice(0);
+        this.$('.g-nifti-slider').val(0);
+    },
+
+    _previousSlice: function () {
+        let newSlice = this._currentSlice - 1;
+        if (newSlice < 0) newSlice = this._maxSlices - 1;
+        this._setSlice(newSlice);
+        this.$('.g-nifti-slider').val(newSlice);
+    },
+
+    _nextSlice: function () {
+        let newSlice = this._currentSlice + 1;
+        if (newSlice >= this._maxSlices) newSlice = 0;
+        this._setSlice(newSlice);
+        this.$('.g-nifti-slider').val(newSlice);
+    },
+
+    _lastSlice: function () {
+        this._setSlice(this._maxSlices - 1);
+        this.$('.g-nifti-slider').val(this._maxSlices - 1);
+    },
+
+    // Playback methods
+    play: function () {
+        if (this._playing) {
+            this._playInterval = Math.max(50, this._playInterval * 0.5);
+        } else {
+            this._playing = true;
+        }
+        this._step();
+    },
+
+    pause: function () {
+        this._playing = false;
+        this._playInterval = 500;
+        if (this._playTimer) {
+            clearTimeout(this._playTimer);
+            this._playTimer = null;
         }
     },
 
-    _renderSlice: function () {
-        const dims = [this.niftiHeader.dims[1], this.niftiHeader.dims[2], this.niftiHeader.dims[3]];
-        let width, height, sliceData;
-
-        // Get slice data based on orientation
-        switch (this.currentOrientation) {
-            case 'axial':
-                width = dims[0];
-                height = dims[1];
-                sliceData = this._extractAxialSlice(this.currentSlice);
-                break;
-            case 'coronal':
-                width = dims[0];
-                height = dims[2];
-                sliceData = this._extractCoronalSlice(this.currentSlice);
-                break;
-            case 'sagittal':
-                width = dims[1];
-                height = dims[2];
-                sliceData = this._extractSagittalSlice(this.currentSlice);
-                break;
-        }
-
-        // Set canvas size
-        this.canvas.width = width;
-        this.canvas.height = height;
-
-        // Convert slice data to ImageData
-        const imageData = this._createImageData(sliceData, width, height);
-        this.ctx.putImageData(imageData, 0, 0);
+    _step: function () {
+        if (!this._playing) return;
+        this._nextSlice();
+        this._playTimer = setTimeout(() => this._step(), this._playInterval);
     },
 
-    _extractAxialSlice: function (sliceIndex) {
-        const dims = [this.niftiHeader.dims[1], this.niftiHeader.dims[2], this.niftiHeader.dims[3]];
-        const sliceSize = dims[0] * dims[1];
-        const offset = sliceIndex * sliceSize;
-        
-        const typedData = this._getTypedData();
-        return typedData.slice(offset, offset + sliceSize);
-    },
-
-    _extractCoronalSlice: function (sliceIndex) {
-        const dims = [this.niftiHeader.dims[1], this.niftiHeader.dims[2], this.niftiHeader.dims[3]];
-        const sliceData = new Float32Array(dims[0] * dims[2]);
-        const typedData = this._getTypedData();
-        
-        for (let z = 0; z < dims[2]; z++) {
-            for (let x = 0; x < dims[0]; x++) {
-                const srcIndex = x + sliceIndex * dims[0] + z * dims[0] * dims[1];
-                const dstIndex = x + z * dims[0];
-                sliceData[dstIndex] = typedData[srcIndex];
-            }
-        }
-        
-        return sliceData;
-    },
-
-    _extractSagittalSlice: function (sliceIndex) {
-        const dims = [this.niftiHeader.dims[1], this.niftiHeader.dims[2], this.niftiHeader.dims[3]];
-        const sliceData = new Float32Array(dims[1] * dims[2]);
-        const typedData = this._getTypedData();
-        
-        for (let z = 0; z < dims[2]; z++) {
-            for (let y = 0; y < dims[1]; y++) {
-                const srcIndex = sliceIndex + y * dims[0] + z * dims[0] * dims[1];
-                const dstIndex = y + z * dims[1];
-                sliceData[dstIndex] = typedData[srcIndex];
-            }
-        }
-        
-        return sliceData;
-    },
-
-    _getTypedData: function () {
-        // Convert image data to appropriate typed array based on datatype
-        const datatype = this.niftiHeader.datatypeCode;
-        
-        switch (datatype) {
-            case 2: // unsigned char
-                return new Uint8Array(this.niftiImage);
-            case 4: // signed short
-                return new Int16Array(this.niftiImage);
-            case 8: // signed int
-                return new Int32Array(this.niftiImage);
-            case 16: // float
-                return new Float32Array(this.niftiImage);
-            case 64: // double
-                return new Float64Array(this.niftiImage);
-            default:
-                return new Int16Array(this.niftiImage);
+    // Zoom methods
+    _zoomIn: function () {
+        if (this._sliceImageWidget) {
+            this._sliceImageWidget.zoomIn();
         }
     },
 
-    _createImageData: function (sliceData, width, height) {
-        const imageData = this.ctx.createImageData(width, height);
-        
-        // Apply windowing (window level and window width)
-        const minWindow = this.windowLevel - (this.windowWidth / 2);
-        const maxWindow = this.windowLevel + (this.windowWidth / 2);
-        const windowRange = this.windowWidth || 1;
-        
-        for (let i = 0; i < sliceData.length; i++) {
-            let value = sliceData[i];
-            
-            // Apply window level/width
-            if (value <= minWindow) {
-                value = 0;
-            } else if (value >= maxWindow) {
-                value = 255;
-            } else {
-                value = ((value - minWindow) / windowRange) * 255;
-            }
-            
-            const pixelIndex = i * 4;
-            imageData.data[pixelIndex] = value;     // R
-            imageData.data[pixelIndex + 1] = value; // G
-            imageData.data[pixelIndex + 2] = value; // B
-            imageData.data[pixelIndex + 3] = 255;   // A
+    _zoomOut: function () {
+        if (this._sliceImageWidget) {
+            this._sliceImageWidget.zoomOut();
         }
-        
-        return imageData;
     },
 
+    _resetZoom: function () {
+        if (this._sliceImageWidget) {
+            this._sliceImageWidget.resetZoom();
+        }
+    },
+
+    _autoLevels: function () {
+        if (this._sliceImageWidget) {
+            this._sliceImageWidget.autoLevels();
+        }
+    },
+
+    // Orientation change
     _changeOrientation: function (e) {
         e.preventDefault();
         const $target = this.$(e.currentTarget);
         const newOrientation = $target.data('orientation');
-        
-        if (newOrientation !== this.currentOrientation) {
-            this.currentOrientation = newOrientation;
-            
+
+        if (newOrientation !== this._currentOrientation) {
+            this._currentOrientation = newOrientation;
+
             // Update button states
             this.$('.g-nifti-orientation-btn').removeClass('active');
             $target.addClass('active');
-            
-            // Reset to middle slice
-            const maxSlice = this._getMaxSliceForOrientation();
-            this.currentSlice = Math.floor(maxSlice / 2);
-            this.$('.g-nifti-slice-slider').attr('max', maxSlice - 1).val(this.currentSlice);
-            
+
+            // Update widget
+            if (this._sliceImageWidget) {
+                this._sliceImageWidget.setOrientation(newOrientation);
+                
+                // Get new max slices from widget
+                const maxSlices = this._sliceImageWidget.getMaxSlices();
+                this._maxSlices = maxSlices[newOrientation] || 1;
+                this._currentSlice = this._sliceImageWidget.getCurrentSlice();
+
+                // Update slider
+                this.$('.g-nifti-slider')
+                    .attr('max', this._maxSlices - 1)
+                    .val(this._currentSlice);
+            }
+
             this._updateSliceLabel();
-            this._renderSlice();
         }
     },
 
-    _changeSlice: function (e) {
-        this.currentSlice = parseInt(this.$(e.currentTarget).val());
-        this._updateSliceLabel();
-        this._renderSlice();
-    },
+    destroy: function () {
+        this.pause();
 
-    _updateSliceLabel: function () {
-        const maxSlice = this._getMaxSliceForOrientation();
-        this.$('.g-nifti-slice-label').text(`Slice: ${this.currentSlice + 1} / ${maxSlice}`);
-    },
-
-    _changeWindowLevel: function (e) {
-        this.windowLevel = parseInt(this.$(e.currentTarget).val());
-        this.$('.g-nifti-level-value').text(this.windowLevel);
-        this._renderSlice();
-    },
-
-    _changeWindowWidth: function (e) {
-        this.windowWidth = parseInt(this.$(e.currentTarget).val());
-        this.$('.g-nifti-width-value').text(this.windowWidth);
-        this._renderSlice();
-    },
-
-    _autoWindow: function (e) {
-        e.preventDefault();
-        
-        // Calculate optimal window level/width based on current slice data
-        const typedData = this._getTypedData();
-        
-        // Calculate min/max for the entire volume
-        let min = Infinity, max = -Infinity;
-        for (let i = 0; i < typedData.length; i++) {
-            if (typedData[i] < min) min = typedData[i];
-            if (typedData[i] > max) max = typedData[i];
+        if (this._sliceImageWidget) {
+            this._sliceImageWidget.destroy();
         }
-        
-        this.dataMin = min;
-        this.dataMax = max;
-        
-        // Set window level to middle and width to full range
-        this.windowLevel = Math.round((min + max) / 2);
-        this.windowWidth = Math.round(max - min);
-        
-        // Update UI
-        this.$('.g-nifti-window-level').val(this.windowLevel);
-        this.$('.g-nifti-level-value').text(this.windowLevel);
-        this.$('.g-nifti-window-width').val(this.windowWidth);
-        this.$('.g-nifti-width-value').text(this.windowWidth);
-        
-        // Update slider ranges if needed
-        if (min < -1000) {
-            this.$('.g-nifti-window-level').attr('min', Math.floor(min));
+        if (this._sliceMetadataWidget) {
+            this._sliceMetadataWidget.destroy();
         }
-        if (max > 3000) {
-            this.$('.g-nifti-window-level').attr('max', Math.ceil(max));
-        }
-        if ((max - min) > 4000) {
-            this.$('.g-nifti-window-width').attr('max', Math.ceil(max - min));
-        }
-        
-        this._renderSlice();
-    },
 
-    _resetView: function (e) {
-        e.preventDefault();
-        this.currentOrientation = 'axial';
-        const maxSlice = this._getMaxSliceForOrientation();
-        this.currentSlice = Math.floor(maxSlice / 2);
-        
-        this.$('.g-nifti-orientation-btn').removeClass('active');
-        this.$('.g-nifti-orientation-btn[data-orientation="axial"]').addClass('active');
-        this.$('.g-nifti-slice-slider').attr('max', maxSlice - 1).val(this.currentSlice);
-        
-        this._updateSliceLabel();
-        this._renderSlice();
+        View.prototype.destroy.apply(this, arguments);
     }
 });
 

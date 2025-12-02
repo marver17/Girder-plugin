@@ -1,170 +1,28 @@
-.g-nifti-metadata
-  padding: 20px
-  background: linear-gradient(to bottom, #ffffff 0%, #f8f9fa 100%)
-  border: 1px solid #dee2e6
-  border-radius: 8px
-  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.05)
+// NIfTI metadata panel styles (simile a DICOM tags)
 
-  .g-nifti-metadata-title
-    margin: 0 0 20px 0
-    padding-bottom: 12px
-    border-bottom: 2px solid #0066cc
-    color: #2c3e50
-    font-size: 18px
-    font-weight: 600
-    display: flex
-    align-items: center
-    gap: 8px
+.g-nifti-tags
+  word-wrap break-word
+  font-size 90%
 
-    i
-      color: #0066cc
-      font-size: 20px
+.g-nifti-metadata-table
+  width 100%
+  margin-bottom 0
 
-  .g-nifti-metadata-grid
-    display: grid
-    grid-template-columns: repeat(auto-fit, minmax(300px, 1fr))
-    gap: 20px
-
-  .g-nifti-metadata-section
-    background-color: #fff
-    border: 1px solid #e9ecef
-    border-radius: 6px
-    padding: 15px
-    transition: box-shadow 0.2s
-
+  tbody tr
     &:hover
-      box-shadow: 0 4px 8px rgba(0, 0, 0, 0.08)
+      background-color #f5f5f5
 
-    .g-nifti-section-title
-      margin: 0 0 12px 0
-      color: #495057
-      font-size: 14px
-      font-weight: 600
-      text-transform: uppercase
-      letter-spacing: 0.5px
-      display: flex
-      align-items: center
-      gap: 6px
-      padding-bottom: 8px
-      border-bottom: 1px solid #e9ecef
+  td
+    padding 4px 8px
+    vertical-align top
+    border-bottom 1px solid #eee
 
-      i
-        color: #6c757d
-        font-size: 14px
+  .g-nifti-tag-name
+    font-weight 600
+    color #555
+    width 40%
+    white-space nowrap
 
-    .g-nifti-metadata-table
-      width: 100%
-      border-collapse: separate
-      border-spacing: 0
-
-      tbody tr
-        transition: background-color 0.15s
-
-        &:hover
-          background-color: #f8f9fa
-
-      .g-nifti-meta-label
-        padding: 10px 12px
-        font-size: 13px
-        font-weight: 500
-        color: #6c757d
-        width: 45%
-        border-bottom: 1px solid #f1f3f5
-
-      .g-nifti-meta-value
-        padding: 10px 12px
-        font-size: 13px
-        color: #212529
-        font-family: 'SF Mono', 'Monaco', 'Inconsolata', 'Roboto Mono', monospace
-        border-bottom: 1px solid #f1f3f5
-        font-weight: 500
-
-      tbody tr:last-child
-        .g-nifti-meta-label,
-        .g-nifti-meta-value
-          border-bottom: none
-
-  .g-nifti-badge
-    display: inline-block
-    padding: 3px 10px
-    border-radius: 12px
-    font-size: 12px
-    font-weight: 600
-    text-transform: uppercase
-    letter-spacing: 0.3px
-
-    &.g-nifti-badge-primary
-      background-color: #e3f2fd
-      color: #1976d2
-
-    &.g-nifti-badge-success
-      background-color: #e8f5e9
-      color: #388e3c
-
-    &.g-nifti-badge-info
-      background-color: #e0f7fa
-      color: #0097a7
-
-  .g-nifti-metadata-files
-    margin-top: 15px
-    padding-top: 15px
-    border-top: 1px solid #ddd
-
-    .g-nifti-file-info
-      display: flex
-      align-items: center
-      padding: 8px
-      background-color: #f5f5f5
-      border-radius: 3px
-      margin-bottom: 5px
-
-      i
-        margin-right: 8px
-        color: #0066cc
-
-      .g-nifti-file-name
-        flex: 1
-        font-weight: bold
-
-      .g-nifti-file-size
-        color: #777
-        font-size: 12px
-
-  .g-nifti-json-metadata
-    margin-top: 15px
-    padding: 10px
-    background-color: #f5f5f5
-    border-left: 3px solid #0066cc
-    border-radius: 3px
-    font-family: 'Courier New', monospace
-    font-size: 12px
-    max-height: 300px
-    overflow-y: auto
-
-    pre
-      margin: 0
-      white-space: pre-wrap
-      word-wrap: break-word
-
-.g-nifti-dicom-metadata
-  margin-top: 25px
-  padding: 20px
-  background: linear-gradient(to bottom, #ffffff 0%, #f8f9fa 100%)
-  border: 1px solid #dee2e6
-  border-radius: 8px
-  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.05)
-
-  .g-nifti-metadata-title
-    margin: 0 0 20px 0
-    padding-bottom: 12px
-    border-bottom: 2px solid #17a2b8
-    color: #2c3e50
-    font-size: 18px
-    font-weight: 600
-    display: flex
-    align-items: center
-    gap: 8px
-
-    i
-      color: #17a2b8
-      font-size: 20px
+  .g-nifti-tag-value
+    color #333
+    word-break break-word

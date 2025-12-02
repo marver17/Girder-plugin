@@ -1,9 +1,11 @@
 import { resolve } from 'path';
-import { defineConfig } from 'vite';
+import { defineConfig, PluginOption } from 'vite';
+import fs from 'fs';
 
-function pugPlugin() {
+function pugPlugin(): PluginOption {
   return {
     name: 'pug',
+    enforce: 'pre',
     transform(src: string, id: string) {
       if (id.endsWith('.pug')) {
         const { compileClient } = require('pug');
@@ -16,25 +18,27 @@ function pugPlugin() {
   };
 }
 
-function stylusPlugin() {
+function stylusPlugin(): PluginOption {
   return {
     name: 'stylus',
-    transform(src: string, id: string) {
-      if (id.endsWith('.styl')) {
-        const stylus = require('stylus');
-        return new Promise((resolve, reject) => {
-          stylus.render(src, { filename: id }, (err: Error, css: string) => {
-            if (err) reject(err);
-            else resolve({
-              code: `const style = document.createElement('style');
-style.textContent = ${JSON.stringify(css)};
-document.head.appendChild(style);
-export default style;`,
-              map: null,
-            });
-          });
+    enforce: 'pre',
+    async transform(code: string, id: string) {
+      if (!id.endsWith('.styl')) return null;
+      
+      const stylus = require('stylus');
+      
+      const css: string = await new Promise((resolve, reject) => {
+        stylus.render(code, { filename: id }, (err: Error, result: string) => {
+          if (err) reject(err);
+          else resolve(result);
         });
-      }
+      });
+      
+      // Return as CSS that Vite will process natively
+      return {
+        code: css,
+        map: null,
+      };
     },
   };
 }
@@ -45,8 +49,19 @@ export default defineConfig({
     pugPlugin(),
     stylusPlugin(),
   ],
+  optimizeDeps: {
+    include: ['@niivue/niivue']
+  },
+  define: {
+    'global': 'globalThis',
+  },
+  css: {
+    // Vite will inject CSS when importing
+    devSourcemap: true,
+  },
   build: {
     sourcemap: !process.env.SKIP_SOURCE_MAPS,
+    chunkSizeWarningLimit: 1500,
     lib: {
       entry: resolve(__dirname, 'main.js'),
       name: 'GirderPluginNiftiViewer',
@@ -55,21 +70,17 @@ export default defineConfig({
     },
     rollupOptions: {
       external: [
-        // Girder core modules should be external (provided by Girder)
         /^@girder\/.*/,
-        // jQuery, Backbone, Underscore are provided by Girder
         'jquery',
         'backbone',
         'underscore',
       ],
       output: {
         globals: (id: string) => {
-          // Map @girder/core imports to the global girder object
           if (id.startsWith('@girder/core/')) {
             const path = id.replace('@girder/core/', '');
             return `girder.${path.replace(/\//g, '.')}`;
           }
-          // Map other globals
           const globalMap: Record<string, string> = {
             'jquery': 'jQuery',
             'backbone': 'Backbone',

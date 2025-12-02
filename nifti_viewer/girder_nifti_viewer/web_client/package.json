@@ -3,13 +3,16 @@
   "version": "1.0.0",
   "description": "NIfTI viewer plugin for Girder",
   "license": "Apache-2.0",
-  "main": "./dist/main.js",
+  "main": "./dist/girder-plugin-nifti-viewer.umd.cjs",
   "scripts": {
     "build": "vite build",
     "watch": "vite build --watch"
   },
+  "peerDependencies": {
+    "@girder/core": "*"
+  },
   "dependencies": {
-    "@girder/core": "*",
+    "@niivue/niivue": "^0.65.0",
     "nifti-reader-js": "^0.8.0",
     "pako": "^2.1.0"
   },
@@ -18,9 +21,14 @@
     "pug": "^2.0.4",
     "stylus": "^0.59.0",
     "typescript": "^5.0.0",
-    "vite": "^4.0.0"
+    "vite": "^5.0.0",
+    "vite-plugin-glsl": "^1.3.0"
   },
-  "girder": {
-    "plugin": true
+  "girderPlugin": {
+    "name": "nifti_viewer",
+    "main": "./dist/girder-plugin-nifti-viewer.umd.cjs",
+    "dependencies": [
+      "@girder/core"
+    ]
   }
 }

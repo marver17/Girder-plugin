@@ -1,5 +1,6 @@
 import View from '@girder/core/views/View';
 import { Niivue } from '@niivue/niivue';
+import { NIFTI_CONFIG } from '../constants/NiftiConfig';
 
 /**
  * Niivue-based widget for rendering NIfTI volumes.
@@ -35,6 +36,16 @@ const NiftiSliceImageWidget = View.extend({
             }
             this.nv = null;
         }
+
+        // CRITICAL FIX: Explicitly cleanup canvas to prevent memory leak
+        const canvas = this.el.querySelector('canvas');
+        if (canvas) {
+            // Force canvas cleanup by resetting dimensions
+            canvas.width = 0;
+            canvas.height = 0;
+            canvas.remove();
+        }
+
         // Clear buffer reference for GC
         this.volumeBuffer = null;
         View.prototype.destroy.apply(this, arguments);
@@ -141,10 +152,10 @@ const NiftiSliceImageWidget = View.extend({
 
         // Initialize Niivue
         this.nv = new Niivue({
-            backColor: [0.2, 0.2, 0.2, 1],
-            show3Dcrosshair: false,
-            crosshairColor: [1, 0, 0, 0.5],
-            crosshairWidth: 1,
+            backColor: NIFTI_CONFIG.CANVAS_BG_COLOR,
+            show3Dcrosshair: NIFTI_CONFIG.CROSSHAIR_VISIBLE,
+            crosshairColor: NIFTI_CONFIG.CROSSHAIR_COLOR,
+            crosshairWidth: NIFTI_CONFIG.CROSSHAIR_WIDTH,
             multiplanarForceRender: false,
             sliceType: this._getSliceType(),
             isRadiologicalConvention: true,
@@ -294,7 +305,7 @@ const NiftiSliceImageWidget = View.extend({
     zoomIn: function () {
         if (this.nv) {
             const currentZoom = this.nv.uiData.pan2Dxyzmm[3] || 1;
-            this.nv.uiData.pan2Dxyzmm[3] = currentZoom * 1.2;
+            this.nv.uiData.pan2Dxyzmm[3] = currentZoom * NIFTI_CONFIG.ZOOM_IN_FACTOR;
             this.nv.drawScene();
         }
         return this;
@@ -306,7 +317,7 @@ const NiftiSliceImageWidget = View.extend({
     zoomOut: function () {
         if (this.nv) {
             const currentZoom = this.nv.uiData.pan2Dxyzmm[3] || 1;
-            this.nv.uiData.pan2Dxyzmm[3] = currentZoom / 1.2;
+            this.nv.uiData.pan2Dxyzmm[3] = currentZoom * NIFTI_CONFIG.ZOOM_OUT_FACTOR;
             this.nv.drawScene();
         }
         return this;
@@ -317,7 +328,7 @@ const NiftiSliceImageWidget = View.extend({
      */
     resetZoom: function () {
         if (this.nv) {
-            this.nv.uiData.pan2Dxyzmm = [0, 0, 0, 1];
+            this.nv.uiData.pan2Dxyzmm = [...NIFTI_CONFIG.ZOOM_DEFAULT];
             this.nv.drawScene();
         }
         return this;

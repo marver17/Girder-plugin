@@ -10,6 +10,15 @@
   .g-nifti-left
     //- Image display area
     .g-nifti-image
+      //- Loading overlay
+      .g-nifti-loading(style="display:none")
+        .g-nifti-spinner
+          i.icon-spin.icon-spinner
+        p.g-nifti-loading-text Loading
+          strong.g-nifti-loading-filename
+        .g-nifti-progress
+          .g-nifti-progress-bar(style="width: 0%")
+        small.g-nifti-progress-text 0%
 
     //- File info
     .g-nifti-filename Loading...

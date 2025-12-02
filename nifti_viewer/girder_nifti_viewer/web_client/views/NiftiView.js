@@ -3,6 +3,7 @@ import { restRequest } from '@girder/core/rest';
 
 import NiftiFileModel from '../models/NiftiFileModel';
 import NiftiSliceImageWidget from './NiftiSliceImageWidget';
+import { NIFTI_CONFIG } from '../constants/NiftiConfig';
 
 import NiftiItemTemplate from '../templates/niftiItem.pug';
 import '../stylesheets/niftiItem.styl';
@@ -150,13 +151,13 @@ const NiftiView = View.extend({
 
         // Playback state
         this._playing = false;
-        this._playInterval = 500;
+        this._playInterval = NIFTI_CONFIG.PLAY_INITIAL_INTERVAL;
         this._playTimer = null;
 
         // Create debounced slider handler
         this._debouncedSliderHandler = debounce((sliceIndex) => {
             this._setSlice(sliceIndex);
-        }, 10);
+        }, NIFTI_CONFIG.SLIDER_DEBOUNCE_MS);
     },
 
     _onSliderInput: function (e) {
@@ -196,12 +197,26 @@ const NiftiView = View.extend({
         // Create NiftiFileModel for cached loading
         this._niftiFileModel = new NiftiFileModel({ _id: niftiFile.id });
 
-        // Show loading indicator
+        // Show loading overlay
+        this.$('.g-nifti-loading').show();
+        this.$('.g-nifti-loading-filename').text(volumeName);
         this.$('.g-nifti-filename').text('Loading NIfTI file...');
 
-        // Load volume using cached model
-        this._niftiFileModel.getVolume()
+        // Load volume using cached model with progress tracking
+        this._niftiFileModel.getVolumeWithProgress((loaded, total) => {
+            // Update progress bar
+            if (total > 0) {
+                const percent = Math.round((loaded / total) * 100);
+                this.$('.g-nifti-progress-bar').css('width', percent + '%');
+                const loadedMB = (loaded / 1024 / 1024).toFixed(1);
+                const totalMB = (total / 1024 / 1024).toFixed(1);
+                this.$('.g-nifti-progress-text').text(`${loadedMB} MB / ${totalMB} MB (${percent}%)`);
+            }
+        })
             .then((arrayBuffer) => {
+                // Hide loading overlay
+                this.$('.g-nifti-loading').hide();
+
                 // Pass cached ArrayBuffer to widget for fast loading
                 this._sliceImageWidget
                     .setVolumeBuffer(arrayBuffer, volumeName)
@@ -209,7 +224,24 @@ const NiftiView = View.extend({
             })
             .catch((error) => {
                 console.error('Failed to load NIfTI volume:', error);
-                this.$('.g-nifti-filename').text('Error loading NIfTI file');
+
+                // Show detailed error message
+                const errorMessage = this._getErrorMessage(error);
+                this.$('.g-nifti-loading').html(`
+                    <div class="alert alert-danger">
+                        <i class="icon-warning-sign"></i>
+                        <strong>Failed to load NIfTI file</strong>
+                        <p>${errorMessage}</p>
+                        <button class="btn btn-sm btn-primary g-nifti-retry">
+                            <i class="icon-refresh"></i> Retry
+                        </button>
+                    </div>
+                `);
+
+                // Add retry handler
+                this.$('.g-nifti-retry').on('click', () => {
+                    this.render();
+                });
             });
 
         // Load JSON sidecar if available
@@ -309,8 +341,18 @@ const NiftiView = View.extend({
 
     // Playback methods
     play: function () {
+        // CRITICAL FIX: Clear any existing timer to prevent memory leak
+        if (this._playTimer) {
+            clearTimeout(this._playTimer);
+            this._playTimer = null;
+        }
+
         if (this._playing) {
-            this._playInterval = Math.max(50, this._playInterval * 0.5);
+            // Speed up on repeated play clicks
+            this._playInterval = Math.max(
+                NIFTI_CONFIG.PLAY_MIN_INTERVAL,
+                this._playInterval * NIFTI_CONFIG.PLAY_SPEED_FACTOR
+            );
         } else {
             this._playing = true;
         }
@@ -319,7 +361,7 @@ const NiftiView = View.extend({
 
     pause: function () {
         this._playing = false;
-        this._playInterval = 500;
+        this._playInterval = NIFTI_CONFIG.PLAY_INITIAL_INTERVAL;
         if (this._playTimer) {
             clearTimeout(this._playTimer);
             this._playTimer = null;
@@ -373,7 +415,7 @@ const NiftiView = View.extend({
             // Update widget
             if (this._sliceImageWidget) {
                 this._sliceImageWidget.setOrientation(newOrientation);
-                
+
                 // Get new max slices from widget
                 const maxSlices = this._sliceImageWidget.getMaxSlices();
                 this._maxSlices = maxSlices[newOrientation] || 1;
@@ -387,6 +429,33 @@ const NiftiView = View.extend({
 
             this._updateSliceLabel();
         }
+    },
+
+    _getErrorMessage: function (error) {
+        // Parse error and return user-friendly message
+        const errorStr = error.message || error.toString();
+
+        if (errorStr.includes('404') || errorStr.includes('Not Found')) {
+            return 'File not found. The NIfTI file may have been deleted or moved.';
+        }
+        if (errorStr.includes('timeout') || errorStr.includes('Timeout')) {
+            return 'Request timeout. The file is too large or the connection is slow. Please try again.';
+        }
+        if (errorStr.includes('NetworkError') || errorStr.includes('Failed to fetch')) {
+            return 'Network error. Please check your internet connection and try again.';
+        }
+        if (errorStr.includes('403') || errorStr.includes('Forbidden')) {
+            return 'Access denied. You do not have permission to view this file.';
+        }
+        if (errorStr.includes('500') || errorStr.includes('Internal Server Error')) {
+            return 'Server error. Please contact your administrator.';
+        }
+        if (errorStr.includes('decode') || errorStr.includes('parse')) {
+            return 'Invalid NIfTI file format. The file may be corrupted.';
+        }
+
+        // Default error message
+        return `Error: ${errorStr}`;
     },
 
     destroy: function () {

@@ -25,10 +25,13 @@ export const NIFTI_CONFIG = {
     // Network/Loading
     LOAD_TIMEOUT_MS: 30000,       // 30 seconds timeout for file loading
 
-    // Crosshair
-    CROSSHAIR_COLOR: [1, 0, 0, 0.5],  // red with 50% opacity
-    CROSSHAIR_WIDTH: 1,
+    // Crosshair (disabled)
     CROSSHAIR_VISIBLE: false,
+
+    // Window/Level settings
+    AUTO_LEVEL_PERCENTILE_LOW: 0.02,   // 2° percentile per contrasto migliore
+    AUTO_LEVEL_PERCENTILE_HIGH: 0.98,  // 98° percentile per contrasto migliore
+    AUTO_LEVEL_SAMPLE_RATE: 100000,    // Max samples per calcolo percentili
 
     // Window/Level Presets (for future implementation)
     WINDOW_LEVEL_PRESETS: {

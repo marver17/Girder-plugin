@@ -153,9 +153,9 @@ const NiftiSliceImageWidget = View.extend({
         // Initialize Niivue
         this.nv = new Niivue({
             backColor: NIFTI_CONFIG.CANVAS_BG_COLOR,
-            show3Dcrosshair: NIFTI_CONFIG.CROSSHAIR_VISIBLE,
-            crosshairColor: NIFTI_CONFIG.CROSSHAIR_COLOR,
-            crosshairWidth: NIFTI_CONFIG.CROSSHAIR_WIDTH,
+            show3Dcrosshair: false,
+            crosshairColor: [0, 0, 0, 0],  // Alpha = 0 per nascondere completamente il crosshair
+            crosshairWidth: 0,
             multiplanarForceRender: false,
             sliceType: this._getSliceType(),
             isRadiologicalConvention: true,
@@ -281,19 +281,60 @@ const NiftiSliceImageWidget = View.extend({
     },
 
     /**
-     * Auto-adjust window/level based on image histogram
+     * Auto-adjust window/level based on image histogram with percentiles
      */
     autoLevels: function () {
         if (this.nv && this.nv.volumes.length > 0) {
             const vol = this.nv.volumes[0];
-            // Use robust min/max (2nd and 98th percentile would be ideal, but use global for simplicity)
-            vol.cal_min = vol.global_min;
-            vol.cal_max = vol.global_max;
+
+            let min, max;
+
+            // FIX: Calcola percentili per un contrasto migliore
+            if (vol.img && vol.img.length > 1000) {
+                // Campiona i voxel per performance (ogni N voxel)
+                const sampleRate = Math.max(1, Math.floor(vol.img.length / NIFTI_CONFIG.AUTO_LEVEL_SAMPLE_RATE));
+                const samples = [];
+
+                for (let i = 0; i < vol.img.length; i += sampleRate) {
+                    const value = vol.img[i];
+                    if (!isNaN(value) && isFinite(value)) {
+                        samples.push(value);
+                    }
+                }
+
+                if (samples.length > 10) {
+                    // Ordina e trova percentili
+                    samples.sort((a, b) => a - b);
+                    const p2Idx = Math.floor(samples.length * NIFTI_CONFIG.AUTO_LEVEL_PERCENTILE_LOW);
+                    const p98Idx = Math.floor(samples.length * NIFTI_CONFIG.AUTO_LEVEL_PERCENTILE_HIGH);
+
+                    min = samples[p2Idx];
+                    max = samples[p98Idx];
+                } else {
+                    // Fallback se non ci sono abbastanza samples
+                    min = vol.global_min;
+                    max = vol.global_max;
+                }
+            } else {
+                // Fallback: usa global_min/max con margine del 5%
+                const range = vol.global_max - vol.global_min;
+                min = vol.global_min + range * 0.05;
+                max = vol.global_max - range * 0.05;
+            }
+
+            // Evita min == max
+            if (min >= max) {
+                min = vol.global_min;
+                max = vol.global_max;
+            }
+
+            vol.cal_min = min;
+            vol.cal_max = max;
             this.nv.updateGLVolume();
-            
+
             return {
-                level: (vol.cal_min + vol.cal_max) / 2,
-                width: vol.cal_max - vol.cal_min
+                level: (min + max) / 2,
+                width: max - min
             };
         }
         return null;
@@ -304,8 +345,8 @@ const NiftiSliceImageWidget = View.extend({
      */
     zoomIn: function () {
         if (this.nv) {
-            const currentZoom = this.nv.uiData.pan2Dxyzmm[3] || 1;
-            this.nv.uiData.pan2Dxyzmm[3] = currentZoom * NIFTI_CONFIG.ZOOM_IN_FACTOR;
+            // FIX: Usa scene.volScaleMultiplier invece di pan2Dxyzmm
+            this.nv.scene.volScaleMultiplier *= NIFTI_CONFIG.ZOOM_IN_FACTOR;
             this.nv.drawScene();
         }
         return this;
@@ -316,8 +357,8 @@ const NiftiSliceImageWidget = View.extend({
      */
     zoomOut: function () {
         if (this.nv) {
-            const currentZoom = this.nv.uiData.pan2Dxyzmm[3] || 1;
-            this.nv.uiData.pan2Dxyzmm[3] = currentZoom * NIFTI_CONFIG.ZOOM_OUT_FACTOR;
+            // FIX: Usa scene.volScaleMultiplier invece di pan2Dxyzmm
+            this.nv.scene.volScaleMultiplier *= NIFTI_CONFIG.ZOOM_OUT_FACTOR;
             this.nv.drawScene();
         }
         return this;
@@ -328,7 +369,8 @@ const NiftiSliceImageWidget = View.extend({
      */
     resetZoom: function () {
         if (this.nv) {
-            this.nv.uiData.pan2Dxyzmm = [...NIFTI_CONFIG.ZOOM_DEFAULT];
+            // FIX: Reset volScaleMultiplier a 1.0
+            this.nv.scene.volScaleMultiplier = 1.0;
             this.nv.drawScene();
         }
         return this;

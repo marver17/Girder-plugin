@@ -1,6 +1,7 @@
 import View from '@girder/core/views/View';
-import { restRequest, getApiRoot } from '@girder/core/rest';
+import { restRequest } from '@girder/core/rest';
 
+import NiftiFileModel from '../models/NiftiFileModel';
 import NiftiSliceImageWidget from './NiftiSliceImageWidget';
 
 import NiftiItemTemplate from '../templates/niftiItem.pug';
@@ -131,6 +132,9 @@ const NiftiView = View.extend({
         this.parentView = settings.parentView;
         this.niftiInfo = this.item.get('nifti');
 
+        // NiftiFileModel for cached volume loading
+        this._niftiFileModel = null;
+
         // Volume and metadata state
         this._volumeInfo = null;
         this._jsonMetadata = null;
@@ -163,7 +167,7 @@ const NiftiView = View.extend({
     render: function () {
         // Get total files info
         const files = this.niftiInfo.files || [];
-        
+
         this.$el.html(NiftiItemTemplate({
             files: files,
             nifti: this.niftiInfo
@@ -185,14 +189,28 @@ const NiftiView = View.extend({
             onVolumeLoaded: (volumeInfo) => this._onVolumeLoaded(volumeInfo)
         });
 
-        // Build URL to download NIfTI file
+        // Get NIfTI file info
         const niftiFile = this.niftiInfo.files[0];
-        const volumeUrl = `${getApiRoot()}/file/${niftiFile.id}/download`;
         const volumeName = niftiFile.name;
 
-        this._sliceImageWidget
-            .setVolumeUrl(volumeUrl, volumeName)
-            .render();
+        // Create NiftiFileModel for cached loading
+        this._niftiFileModel = new NiftiFileModel({ _id: niftiFile.id });
+
+        // Show loading indicator
+        this.$('.g-nifti-filename').text('Loading NIfTI file...');
+
+        // Load volume using cached model
+        this._niftiFileModel.getVolume()
+            .then((arrayBuffer) => {
+                // Pass cached ArrayBuffer to widget for fast loading
+                this._sliceImageWidget
+                    .setVolumeBuffer(arrayBuffer, volumeName)
+                    .render();
+            })
+            .catch((error) => {
+                console.error('Failed to load NIfTI volume:', error);
+                this.$('.g-nifti-filename').text('Error loading NIfTI file');
+            });
 
         // Load JSON sidecar if available
         this._loadJsonMetadata();
@@ -380,6 +398,12 @@ const NiftiView = View.extend({
         if (this._sliceMetadataWidget) {
             this._sliceMetadataWidget.destroy();
         }
+
+        // Clear cached volume if needed (optional - can keep for reuse)
+        // Uncomment to free memory immediately:
+        // if (this._niftiFileModel) {
+        //     this._niftiFileModel.clearCache();
+        // }
 
         View.prototype.destroy.apply(this, arguments);
     }

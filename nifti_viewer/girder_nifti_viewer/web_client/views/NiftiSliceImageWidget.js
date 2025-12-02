@@ -11,14 +11,15 @@ const NiftiSliceImageWidget = View.extend({
     initialize: function (settings) {
         this.nv = null;
         this.volumeUrl = null;
+        this.volumeBuffer = null;  // ArrayBuffer for cached loading
         this.volumeName = null;
         this.volumeData = null;
-        
+
         // View state
         this.currentOrientation = 'axial';
         this.currentSliceIndex = 0;
         this.maxSlices = { axial: 0, coronal: 0, sagittal: 0 };
-        
+
         // Callbacks for parent view
         this.onSliceChange = settings.onSliceChange || null;
         this.onVolumeLoaded = settings.onVolumeLoaded || null;
@@ -28,9 +29,14 @@ const NiftiSliceImageWidget = View.extend({
 
     destroy: function () {
         if (this.nv) {
-            // Cleanup Niivue instance
+            // Properly cleanup Niivue volumes
+            if (this.nv.volumes && this.nv.volumes.length > 0) {
+                this.nv.closeAllVolumes();
+            }
             this.nv = null;
         }
+        // Clear buffer reference for GC
+        this.volumeBuffer = null;
         View.prototype.destroy.apply(this, arguments);
     },
 
@@ -41,6 +47,19 @@ const NiftiSliceImageWidget = View.extend({
      */
     setVolumeUrl: function (url, name) {
         this.volumeUrl = url;
+        this.volumeBuffer = null;  // Clear buffer if using URL
+        this.volumeName = name || 'volume.nii.gz';
+        return this;
+    },
+
+    /**
+     * Set the volume from an ArrayBuffer (preferred for caching)
+     * @param {ArrayBuffer} buffer - ArrayBuffer containing NIfTI data
+     * @param {string} name - Name of the file (e.g., 'brain.nii.gz')
+     */
+    setVolumeBuffer: function (buffer, name) {
+        this.volumeBuffer = buffer;
+        this.volumeUrl = null;  // Clear URL if using buffer
         this.volumeName = name || 'volume.nii.gz';
         return this;
     },
@@ -134,8 +153,8 @@ const NiftiSliceImageWidget = View.extend({
 
         this.nv.attachToCanvas(canvas);
 
-        // Load volume if URL is set
-        if (this.volumeUrl) {
+        // Load volume if buffer or URL is set (prefer buffer for caching)
+        if (this.volumeBuffer || this.volumeUrl) {
             this._loadVolume();
         }
 
@@ -143,16 +162,30 @@ const NiftiSliceImageWidget = View.extend({
     },
 
     /**
-     * Load volume from URL
+     * Load volume from ArrayBuffer or URL
+     * Prefers ArrayBuffer (cached) over URL loading
      */
     _loadVolume: function () {
-        if (!this.nv || !this.volumeUrl) return;
+        if (!this.nv) return;
 
-        this.nv.loadVolumes([{ url: this.volumeUrl, name: this.volumeName }])
+        let loadPromise;
+
+        // Prefer ArrayBuffer loading (cached) over URL
+        if (this.volumeBuffer) {
+            // Load from cached ArrayBuffer
+            loadPromise = this.nv.loadFromArrayBuffer(this.volumeBuffer, this.volumeName);
+        } else if (this.volumeUrl) {
+            // Fallback to URL loading
+            loadPromise = this.nv.loadVolumes([{ url: this.volumeUrl, name: this.volumeName }]);
+        } else {
+            return;
+        }
+
+        loadPromise
             .then(() => {
                 if (this.nv.volumes.length > 0) {
                     const vol = this.nv.volumes[0];
-                    
+
                     // Calculate max slices for each orientation
                     this.maxSlices = {
                         axial: vol.dims[3] || 1,
@@ -162,7 +195,7 @@ const NiftiSliceImageWidget = View.extend({
 
                     // Apply initial settings
                     this._applyOrientation();
-                    
+
                     // Notify parent
                     if (this.onVolumeLoaded) {
                         this.onVolumeLoaded({

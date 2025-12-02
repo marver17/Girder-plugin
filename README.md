@@ -25,3 +25,4 @@ Plugin per l'autenticazione OAuth2 con supporto per molteplici provider di ident
 ##TODO
 TODO risolvere problemi orientamento nifti-viewer 
 TODO adattare il nifti viewer ad essere simile a dicom-viewer vecchie
+TODO fix redis configuration docker compose 

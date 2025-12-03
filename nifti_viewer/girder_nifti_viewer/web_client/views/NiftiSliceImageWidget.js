@@ -25,19 +25,10 @@ const NiftiSliceImageWidget = View.extend({
         this.onSliceChange = settings.onSliceChange || null;
         this.onVolumeLoaded = settings.onVolumeLoaded || null;
 
-        // Bind wheel event handler
-        this._boundWheelHandler = this._onMouseWheel.bind(this);
-
         View.prototype.initialize.call(this, settings);
     },
 
     destroy: function () {
-        // Remove wheel event listener
-        const canvas = this.el.querySelector('canvas');
-        if (canvas && this._boundWheelHandler) {
-            canvas.removeEventListener('wheel', this._boundWheelHandler);
-        }
-
         if (this.nv) {
             // FIX: Properly cleanup Niivue volumes usando removeVolumeByIndex
             if (this.nv.volumes && this.nv.volumes.length > 0) {
@@ -54,6 +45,7 @@ const NiftiSliceImageWidget = View.extend({
         }
 
         // CRITICAL FIX: Explicitly cleanup canvas to prevent memory leak
+        const canvas = this.el.querySelector('canvas');
         if (canvas) {
             // Force canvas cleanup by resetting dimensions
             canvas.width = 0;
@@ -174,10 +166,19 @@ const NiftiSliceImageWidget = View.extend({
             multiplanarForceRender: false,
             sliceType: this._getSliceType(),
             isRadiologicalConvention: true,
-            logging: false
+            logging: false,
+            // FIX: Usa dragMode pan per permettere spostamento con tasto destro
+            // 0 = none, 1 = contrast (windowing), 2 = measurement, 3 = pan
+            dragMode: 3  // pan mode: tasto destro sposta l'immagine senza windowing
         });
 
         this.nv.attachToCanvas(canvas);
+
+        // Previeni il menu contestuale del browser sul tasto destro
+        canvas.addEventListener('contextmenu', (e) => {
+            e.preventDefault();
+            return false;
+        });
 
         // Load volume if buffer or URL is set (prefer buffer for caching)
         if (this.volumeBuffer || this.volumeUrl) {
@@ -233,12 +234,6 @@ const NiftiSliceImageWidget = View.extend({
                             global_min: vol.global_min,
                             global_max: vol.global_max
                         });
-                    }
-
-                    // Attach wheel event listener to canvas to sync slider
-                    const canvas = this.el.querySelector('canvas');
-                    if (canvas && this._boundWheelHandler) {
-                        canvas.addEventListener('wheel', this._boundWheelHandler);
                     }
                 }
             })
@@ -393,8 +388,10 @@ const NiftiSliceImageWidget = View.extend({
      */
     resetZoom: function () {
         if (this.nv) {
-            // FIX: Reset zoom 2D a 1.0
-            this.nv.scene.pan2Dxyzmm[3] = 1.0;
+            // FIX: Reset zoom 2D a 1.0 e ripristina anche la posizione (pan)
+            // pan2Dxyzmm = [x, y, z, zoom]
+            // Resetta tutto a [0, 0, 0, 1.0]
+            this.nv.scene.pan2Dxyzmm = [0, 0, 0, 1.0];
             this.nv.drawScene();
         }
         return this;
@@ -447,50 +444,6 @@ const NiftiSliceImageWidget = View.extend({
      */
     getCurrentSlice: function () {
         return this.currentSliceIndex;
-    },
-
-    /**
-     * Handle mouse wheel events to sync slider with Niivue navigation
-     * @private
-     */
-    _onMouseWheel: function (e) {
-        if (!this.nv || !this.nv.scene || this.nv.volumes.length === 0) return;
-
-        // Usa setTimeout per dare tempo a Niivue di aggiornare crosshairPos
-        setTimeout(() => {
-            // Leggi la posizione corrente del crosshair da Niivue
-            const pos = this.nv.scene.crosshairPos;
-            const maxSlice = this.maxSlices[this.currentOrientation] || 1;
-
-            // Converti la frazione (0-1) in indice di slice
-            let frac;
-            switch (this.currentOrientation) {
-                case 'axial':
-                    frac = pos[2];
-                    break;
-                case 'coronal':
-                    frac = pos[1];
-                    break;
-                case 'sagittal':
-                    frac = pos[0];
-                    break;
-                default:
-                    frac = 0.5;
-            }
-
-            // Calcola l'indice di slice (0-based)
-            const sliceIndex = Math.round(frac * (maxSlice - 1));
-
-            // Aggiorna lo stato interno solo se è cambiato
-            if (sliceIndex !== this.currentSliceIndex) {
-                this.currentSliceIndex = sliceIndex;
-
-                // Notifica il parent view per aggiornare lo slider
-                if (this.onSliceChange) {
-                    this.onSliceChange(sliceIndex);
-                }
-            }
-        }, 0);
     }
 });
 

@@ -286,6 +286,27 @@ const NiftiView = View.extend({
         // Enable controls
         this._toggleControls(true);
 
+        // Add wheel event listener to slider for slice navigation
+        const slider = this.$('.g-nifti-slider')[0];
+        if (slider && !slider._wheelListenerAttached) {
+            slider.addEventListener('wheel', (e) => {
+                e.preventDefault();
+                const delta = e.deltaY > 0 ? 1 : -1;
+                let newSlice = this._currentSlice + delta;
+
+                // Clamp to valid range
+                if (newSlice < 0) newSlice = 0;
+                if (newSlice >= this._maxSlices) newSlice = this._maxSlices - 1;
+
+                if (newSlice !== this._currentSlice) {
+                    this._currentSlice = newSlice;
+                    this.$('.g-nifti-slider').val(newSlice);
+                    this._setSlice(newSlice);
+                }
+            });
+            slider._wheelListenerAttached = true;
+        }
+
         // Update metadata widget with volume info
         this._sliceMetadataWidget
             .setVolumeInfo(volumeInfo)

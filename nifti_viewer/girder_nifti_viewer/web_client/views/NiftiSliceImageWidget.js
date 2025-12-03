@@ -30,9 +30,16 @@ const NiftiSliceImageWidget = View.extend({
 
     destroy: function () {
         if (this.nv) {
-            // Properly cleanup Niivue volumes
+            // FIX: Properly cleanup Niivue volumes usando removeVolumeByIndex
             if (this.nv.volumes && this.nv.volumes.length > 0) {
-                this.nv.closeAllVolumes();
+                // Rimuovi tutti i volumi dalla fine all'inizio
+                for (let i = this.nv.volumes.length - 1; i >= 0; i--) {
+                    try {
+                        this.nv.removeVolumeByIndex(i);
+                    } catch (e) {
+                        console.warn('Error removing volume:', e);
+                    }
+                }
             }
             this.nv = null;
         }

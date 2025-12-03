@@ -366,10 +366,11 @@ const NiftiSliceImageWidget = View.extend({
      */
     zoomIn: function () {
         if (this.nv) {
-            // FIX: Usa setScale() invece di modificare direttamente volScaleMultiplier
-            // setScale() gestisce correttamente il ridisegno per tutte le modalità di visualizzazione
-            const currentScale = this.nv.volScaleMultiplier;
-            this.nv.setScale(currentScale * NIFTI_CONFIG.ZOOM_IN_FACTOR);
+            // FIX: Per le slice 2D, Niivue usa pan2Dxyzmm[3] per lo zoom
+            // setScale() è solo per il rendering 3D
+            const currentZoom = this.nv.scene.pan2Dxyzmm[3];
+            this.nv.scene.pan2Dxyzmm[3] = currentZoom * NIFTI_CONFIG.ZOOM_IN_FACTOR;
+            this.nv.drawScene();
         }
         return this;
     },
@@ -379,9 +380,10 @@ const NiftiSliceImageWidget = View.extend({
      */
     zoomOut: function () {
         if (this.nv) {
-            // FIX: Usa setScale() invece di modificare direttamente volScaleMultiplier
-            const currentScale = this.nv.volScaleMultiplier;
-            this.nv.setScale(currentScale * NIFTI_CONFIG.ZOOM_OUT_FACTOR);
+            // FIX: Per le slice 2D, Niivue usa pan2Dxyzmm[3] per lo zoom
+            const currentZoom = this.nv.scene.pan2Dxyzmm[3];
+            this.nv.scene.pan2Dxyzmm[3] = currentZoom * NIFTI_CONFIG.ZOOM_OUT_FACTOR;
+            this.nv.drawScene();
         }
         return this;
     },
@@ -391,8 +393,9 @@ const NiftiSliceImageWidget = View.extend({
      */
     resetZoom: function () {
         if (this.nv) {
-            // FIX: Reset zoom usando setScale(1.0)
-            this.nv.setScale(1.0);
+            // FIX: Reset zoom 2D a 1.0
+            this.nv.scene.pan2Dxyzmm[3] = 1.0;
+            this.nv.drawScene();
         }
         return this;
     },

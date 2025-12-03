@@ -187,7 +187,8 @@ const NiftiView = View.extend({
         this._sliceImageWidget = new NiftiSliceImageWidget({
             el: this.$('.g-nifti-image'),
             parentView: this,
-            onVolumeLoaded: (volumeInfo) => this._onVolumeLoaded(volumeInfo)
+            onVolumeLoaded: (volumeInfo) => this._onVolumeLoaded(volumeInfo),
+            onSliceChange: (sliceIndex) => this._onSliceChangeFromWheel(sliceIndex)
         });
 
         // Get NIfTI file info
@@ -429,6 +430,20 @@ const NiftiView = View.extend({
 
             this._updateSliceLabel();
         }
+    },
+
+    /**
+     * Handle slice change from mouse wheel navigation
+     * Updates slider and label to reflect Niivue's current position
+     */
+    _onSliceChangeFromWheel: function (sliceIndex) {
+        this._currentSlice = sliceIndex;
+
+        // Update slider position
+        this.$('.g-nifti-slider').val(sliceIndex);
+
+        // Update label
+        this._updateSliceLabel();
     },
 
     _getErrorMessage: function (error) {

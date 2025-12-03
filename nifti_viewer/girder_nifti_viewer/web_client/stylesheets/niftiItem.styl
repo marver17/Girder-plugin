@@ -122,6 +122,60 @@
       width 100%
       margin 5px 0
 
+  .g-nifti-window-level-panel
+    clear both
+    margin-top 10px
+    padding 8px
+    background-color #f5f5f5
+    border-radius 4px
+    border 1px solid #ddd
+
+    .g-nifti-wl-header
+      cursor pointer
+      font-weight 600
+      color #555
+      margin-bottom 8px
+      display flex
+      align-items center
+      gap 5px
+
+      i
+        color #337ab7
+
+      .g-nifti-wl-toggle
+        margin-left auto
+        padding 0 5px
+        color #666
+
+        &:hover
+          color #337ab7
+
+    .g-nifti-wl-controls
+      padding-top 8px
+
+    .g-nifti-wl-row
+      margin-bottom 10px
+
+      label
+        display block
+        font-size 12px
+        font-weight 500
+        color #666
+        margin-bottom 3px
+
+      input[type="range"]
+        width calc(100% - 60px)
+        margin-right 8px
+        vertical-align middle
+
+      span
+        display inline-block
+        width 50px
+        text-align right
+        font-size 12px
+        font-weight 500
+        color #333
+
   .g-nifti-orientation
     clear both
     padding-top 10px

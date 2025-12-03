@@ -366,9 +366,10 @@ const NiftiSliceImageWidget = View.extend({
      */
     zoomIn: function () {
         if (this.nv) {
-            // FIX: Usa scene.volScaleMultiplier invece di pan2Dxyzmm
-            this.nv.scene.volScaleMultiplier *= NIFTI_CONFIG.ZOOM_IN_FACTOR;
-            this.nv.drawScene();
+            // FIX: Usa setScale() invece di modificare direttamente volScaleMultiplier
+            // setScale() gestisce correttamente il ridisegno per tutte le modalità di visualizzazione
+            const currentScale = this.nv.volScaleMultiplier;
+            this.nv.setScale(currentScale * NIFTI_CONFIG.ZOOM_IN_FACTOR);
         }
         return this;
     },
@@ -378,9 +379,9 @@ const NiftiSliceImageWidget = View.extend({
      */
     zoomOut: function () {
         if (this.nv) {
-            // FIX: Usa scene.volScaleMultiplier invece di pan2Dxyzmm
-            this.nv.scene.volScaleMultiplier *= NIFTI_CONFIG.ZOOM_OUT_FACTOR;
-            this.nv.drawScene();
+            // FIX: Usa setScale() invece di modificare direttamente volScaleMultiplier
+            const currentScale = this.nv.volScaleMultiplier;
+            this.nv.setScale(currentScale * NIFTI_CONFIG.ZOOM_OUT_FACTOR);
         }
         return this;
     },
@@ -390,9 +391,8 @@ const NiftiSliceImageWidget = View.extend({
      */
     resetZoom: function () {
         if (this.nv) {
-            // FIX: Reset volScaleMultiplier a 1.0
-            this.nv.scene.volScaleMultiplier = 1.0;
-            this.nv.drawScene();
+            // FIX: Reset zoom usando setScale(1.0)
+            this.nv.setScale(1.0);
         }
         return this;
     },

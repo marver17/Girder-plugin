@@ -124,6 +124,11 @@ const NiftiView = View.extend({
         'click .g-nifti-reset-zoom': '_resetZoom',
         'click .g-nifti-auto-levels': '_autoLevels',
 
+        // Window/Level controls
+        'click .g-nifti-wl-header': '_toggleWindowLevelPanel',
+        'input .g-nifti-window-slider': '_onWindowChange',
+        'input .g-nifti-level-slider': '_onLevelChange',
+
         // Orientation buttons
         'click .g-nifti-orientation-btn': '_changeOrientation'
     },
@@ -154,10 +159,24 @@ const NiftiView = View.extend({
         this._playInterval = NIFTI_CONFIG.PLAY_INITIAL_INTERVAL;
         this._playTimer = null;
 
+        // Window/Level state
+        this._currentWindow = 400;
+        this._currentLevel = 50;
+        this._windowLevelPanelVisible = false;
+
         // Create debounced slider handler
         this._debouncedSliderHandler = debounce((sliceIndex) => {
             this._setSlice(sliceIndex);
         }, NIFTI_CONFIG.SLIDER_DEBOUNCE_MS);
+
+        // Create debounced window/level handlers
+        this._debouncedWindowHandler = debounce((window) => {
+            this._applyWindowLevel(this._currentLevel, window);
+        }, 50);
+
+        this._debouncedLevelHandler = debounce((level) => {
+            this._applyWindowLevel(level, this._currentWindow);
+        }, 50);
     },
 
     _onSliderInput: function (e) {
@@ -444,6 +463,46 @@ const NiftiView = View.extend({
 
         // Update label
         this._updateSliceLabel();
+    },
+
+    // Window/Level controls
+    _toggleWindowLevelPanel: function () {
+        this._windowLevelPanelVisible = !this._windowLevelPanelVisible;
+
+        const $controls = this.$('.g-nifti-wl-controls');
+        const $toggleIcon = this.$('.g-nifti-wl-toggle i');
+
+        if (this._windowLevelPanelVisible) {
+            $controls.slideDown(200);
+            $toggleIcon.removeClass('icon-angle-down').addClass('icon-angle-up');
+
+            // Enable sliders
+            this.$('.g-nifti-window-slider').prop('disabled', false);
+            this.$('.g-nifti-level-slider').prop('disabled', false);
+        } else {
+            $controls.slideUp(200);
+            $toggleIcon.removeClass('icon-angle-up').addClass('icon-angle-down');
+        }
+    },
+
+    _onWindowChange: function (e) {
+        const window = parseInt(e.target.value);
+        this._currentWindow = window;
+        this.$('.g-nifti-window-value').text(window);
+        this._debouncedWindowHandler(window);
+    },
+
+    _onLevelChange: function (e) {
+        const level = parseInt(e.target.value);
+        this._currentLevel = level;
+        this.$('.g-nifti-level-value').text(level);
+        this._debouncedLevelHandler(level);
+    },
+
+    _applyWindowLevel: function (level, window) {
+        if (this._sliceImageWidget) {
+            this._sliceImageWidget.setWindowLevel(level, window);
+        }
     },
 
     _getErrorMessage: function (error) {

@@ -51,8 +51,25 @@
           i.icon-zoom-out
         button.g-nifti-reset-zoom.btn.btn-sm.btn-default(title="Reset Zoom")
           i.icon-search
-        button.g-nifti-auto-levels.btn.btn-sm.btn-default(title="Auto Window/Level")
+        button.g-nifti-auto-levels.btn.btn-sm.btn-default(title="Auto Contrast")
           i.icon-adjust
+
+    //- Window/Level controls (collapsible)
+    .g-nifti-window-level-panel
+      .g-nifti-wl-header
+        i.icon-adjust
+        |  Contrast & Brightness
+        button.g-nifti-wl-toggle.btn.btn-xs.btn-link(title="Show/Hide")
+          i.icon-angle-down
+      .g-nifti-wl-controls(style="display:none")
+        .g-nifti-wl-row
+          label Window (Contrast):
+          input.g-nifti-window-slider(type="range", min=1, max=5000, step=1, value=400, disabled)
+          span.g-nifti-window-value 400
+        .g-nifti-wl-row
+          label Level (Brightness):
+          input.g-nifti-level-slider(type="range", min=-1000, max=3000, step=1, value=50, disabled)
+          span.g-nifti-level-value 50
 
     //- Orientation selector
     .g-nifti-orientation

@@ -460,10 +460,16 @@ def niftiSubstringSearchHandler(query, types, user=None, level=None, limit=0, of
     logger.info(f'=== NIfTI Search Handler Called ===')
     logger.info(f'Query: "{query}"')
     logger.info(f'Types: {types}')
+    logger.info(f'Types type: {type(types)}')
 
-    if 'item' not in types:
-        logger.info('Skipping: "item" not in types')
-        return []
+    # Check if searching for items (same as DICOM plugin)
+    if types != ['item']:
+        logger.info(f'Skipping: types is {types}, not ["item"]')
+        raise RestException('The nifti search is only able to search in Item.')
+
+    if not isinstance(query, str):
+        logger.info(f'Skipping: query is not string: {type(query)}')
+        raise RestException('The search query must be a string.')
 
     # Costruisci condizioni di ricerca complete
     conditions = _buildSearchConditions(query)

@@ -355,25 +355,129 @@ def _uploadHandler(event):
         logger.info(f'Not a NIfTI file, skipping: {name}')
 
 
+def _buildSearchConditions(query):
+    """
+    Costruisce condizioni di ricerca MongoDB per tutti i campi metadati NIfTI.
+
+    Cerca in:
+    - Campi stringa header NIfTI (orientation, datatype, units, ecc.)
+    - Campi metadati BIDS JSON (ProtocolName, Manufacturer, ecc.)
+    - Nomi file
+    - Campi array numerici quando la query è un numero
+
+    :param query: Stringa di ricerca dall'utente
+    :returns: Lista di condizioni query MongoDB
+    """
+    conditions = []
+
+    # Campi stringa header NIfTI
+    string_fields = [
+        'nifti.meta.orientation',
+        'nifti.meta.dataType',
+        'nifti.meta.datatype',  # Campo legacy
+        'nifti.meta.units',
+        'nifti.meta.time_units',
+        'nifti.meta.file_type',
+    ]
+
+    for field in string_fields:
+        conditions.append({field: {'$regex': query, '$options': 'i'}})
+
+    # Gestione query numeriche per campi array (dimensioni, spacing)
+    try:
+        numeric_query = float(query)
+        # Cerca negli array dimensioni/spacing
+        conditions.append({'nifti.meta.dimensions': numeric_query})
+        conditions.append({'nifti.meta.dims': numeric_query})
+        conditions.append({'nifti.meta.pixelSpacing': numeric_query})
+        conditions.append({'nifti.meta.pixdim': numeric_query})
+    except ValueError:
+        # Non è un numero, salta ricerca array numerici
+        pass
+
+    # Campi metadati BIDS JSON (alto valore per utenti)
+    bids_fields = [
+        # Protocollo/Sequenza (più cercati)
+        'nifti.meta.json_metadata.ProtocolName',
+        'nifti.meta.json_metadata.SeriesDescription',
+        'nifti.meta.json_metadata.SequenceName',
+        'nifti.meta.json_metadata.PulseSequenceType',
+        'nifti.meta.json_metadata.ScanningSequence',
+        'nifti.meta.json_metadata.SequenceVariant',
+
+        # Hardware scanner
+        'nifti.meta.json_metadata.Manufacturer',
+        'nifti.meta.json_metadata.ManufacturersModelName',
+        'nifti.meta.json_metadata.DeviceSerialNumber',
+        'nifti.meta.json_metadata.StationName',
+        'nifti.meta.json_metadata.SoftwareVersions',
+
+        # Istituzione
+        'nifti.meta.json_metadata.InstitutionName',
+        'nifti.meta.json_metadata.InstitutionAddress',
+        'nifti.meta.json_metadata.InstitutionalDepartmentName',
+
+        # Acquisizione
+        'nifti.meta.json_metadata.MagneticFieldStrength',
+        'nifti.meta.json_metadata.ReceiveCoilName',
+        'nifti.meta.json_metadata.TransmitCoilName',
+        'nifti.meta.json_metadata.ImageType',
+
+        # Processing
+        'nifti.meta.json_metadata.ConversionSoftware',
+        'nifti.meta.json_metadata.ConversionSoftwareVersion',
+    ]
+
+    for field in bids_fields:
+        conditions.append({field: {'$regex': query, '$options': 'i'}})
+
+    # Nomi file (files è un array di oggetti con campo 'name')
+    conditions.append({'nifti.files.name': {'$regex': query, '$options': 'i'}})
+
+    return conditions
+
+
 def niftiSubstringSearchHandler(query, types, user=None, level=None, limit=0, offset=0):
     """
-    Search handler for NIfTI items.
-    Search in NIfTI metadata fields.
+    Search handler per item NIfTI.
+
+    Esegue ricerca case-insensitive substring completa su:
+    - Tutti i campi header NIfTI (orientation, datatype, dimensions, spacing, ecc.)
+    - Tutti i campi metadati BIDS JSON (ProtocolName, Manufacturer, ecc.)
+    - Nomi file
+
+    :param query: Stringa di ricerca (substring case-insensitive)
+    :param types: Tipi di risorsa da cercare (deve includere 'item')
+    :param user: Utente che esegue la ricerca
+    :param level: Livello di accesso richiesto
+    :param limit: Numero massimo di risultati
+    :param offset: Numero di risultati da saltare
+    :returns: Lista di dizionari risultati ricerca
     """
+    import logging
+    logger = logging.getLogger('girder.plugins.nifti_viewer')
+
+    logger.info(f'=== NIfTI Search Handler Called ===')
+    logger.info(f'Query: "{query}"')
+    logger.info(f'Types: {types}')
+
     if 'item' not in types:
+        logger.info('Skipping: "item" not in types')
         return []
-    
-    # Build MongoDB query
+
+    # Costruisci condizioni di ricerca complete
+    conditions = _buildSearchConditions(query)
+    logger.info(f'Built {len(conditions)} search conditions')
+
+    # Costruisci query MongoDB
     search_query = {
         'nifti': {'$exists': True},
-        '$or': [
-            {'nifti.meta.orientation': {'$regex': query, '$options': 'i'}},
-            {'nifti.meta.datatype': {'$regex': query, '$options': 'i'}},
-            {'nifti.files.nifti.name': {'$regex': query, '$options': 'i'}},
-        ]
+        '$or': conditions
     }
-    
-    # Execute search
+
+    logger.info(f'MongoDB query: {search_query}')
+
+    # Esegui ricerca
     items = Item().findWithPermissions(
         search_query,
         user=user,
@@ -381,11 +485,26 @@ def niftiSubstringSearchHandler(query, types, user=None, level=None, limit=0, of
         limit=limit,
         offset=offset
     )
-    
-    return [
-        {
-            'type': 'item',
-            'document': item
-        }
-        for item in items
-    ]
+
+    # Filtra risultati con permessi e filtra campi
+    filtered_items = []
+    for item in items:
+        # Usa Item().filter() per filtrare i campi in base ai permessi dell'utente
+        filtered_item = Item().filter(item, user)
+        filtered_items.append(filtered_item)
+
+        # Log per debug
+        if len(filtered_items) <= 3:
+            logger.info(f'Result {len(filtered_items)-1}: {item.get("name", "N/A")} (ID: {item["_id"]})')
+            if 'nifti' in item and 'meta' in item['nifti']:
+                logger.info(f'  Orientation: {item["nifti"]["meta"].get("orientation", "N/A")}')
+
+    logger.info(f'Found {len(filtered_items)} items')
+
+    # Ritorna nel formato corretto per Girder search (stesso formato di DICOM)
+    result = {
+        'item': filtered_items
+    }
+
+    logger.info(f'Returning result with {len(filtered_items)} items')
+    return result

@@ -69,6 +69,10 @@ SearchFieldWidget.addMode(
     ['item'],
     'NIfTI metadata search',
     `You are searching for text in NIfTI metadata. Only Girder items which have been preprocessed to
-        extract NIfTI images will be searched. The search text may appear anywhere within the metadata 
-        keys or values of a NIfTI file.`
+        extract NIfTI metadata will be searched. The search performs case-insensitive substring matching across:
+        - NIfTI header fields (orientation, datatype, dimensions, pixel spacing, units, etc.)
+        - BIDS JSON metadata (ProtocolName, Manufacturer, SeriesDescription, etc.)
+        - File names
+
+        Example searches: "T1", "MPRAGE", "Siemens", "RAS", "256", "3.0"`
 );

@@ -124,6 +124,11 @@ const NiftiView = View.extend({
         'click .g-nifti-reset-zoom': '_resetZoom',
         'click .g-nifti-auto-levels': '_autoLevels',
 
+        // Window/Level controls
+        'click .g-nifti-wl-header': '_toggleWindowLevelPanel',
+        'input .g-nifti-window-slider': '_onWindowChange',
+        'input .g-nifti-level-slider': '_onLevelChange',
+
         // Orientation buttons
         'click .g-nifti-orientation-btn': '_changeOrientation'
     },
@@ -154,10 +159,24 @@ const NiftiView = View.extend({
         this._playInterval = NIFTI_CONFIG.PLAY_INITIAL_INTERVAL;
         this._playTimer = null;
 
+        // Window/Level state
+        this._currentWindow = 400;
+        this._currentLevel = 50;
+        this._windowLevelPanelVisible = false;
+
         // Create debounced slider handler
         this._debouncedSliderHandler = debounce((sliceIndex) => {
             this._setSlice(sliceIndex);
         }, NIFTI_CONFIG.SLIDER_DEBOUNCE_MS);
+
+        // Create debounced window/level handlers
+        this._debouncedWindowHandler = debounce((window) => {
+            this._applyWindowLevel(this._currentLevel, window);
+        }, 50);
+
+        this._debouncedLevelHandler = debounce((level) => {
+            this._applyWindowLevel(level, this._currentWindow);
+        }, 50);
     },
 
     _onSliderInput: function (e) {
@@ -187,7 +206,8 @@ const NiftiView = View.extend({
         this._sliceImageWidget = new NiftiSliceImageWidget({
             el: this.$('.g-nifti-image'),
             parentView: this,
-            onVolumeLoaded: (volumeInfo) => this._onVolumeLoaded(volumeInfo)
+            onVolumeLoaded: (volumeInfo) => this._onVolumeLoaded(volumeInfo),
+            onSliceChange: (sliceIndex) => this._onSliceChangeFromWheel(sliceIndex)
         });
 
         // Get NIfTI file info
@@ -265,6 +285,27 @@ const NiftiView = View.extend({
 
         // Enable controls
         this._toggleControls(true);
+
+        // Add wheel event listener to slider for slice navigation
+        const slider = this.$('.g-nifti-slider')[0];
+        if (slider && !slider._wheelListenerAttached) {
+            slider.addEventListener('wheel', (e) => {
+                e.preventDefault();
+                const delta = e.deltaY > 0 ? 1 : -1;
+                let newSlice = this._currentSlice + delta;
+
+                // Clamp to valid range
+                if (newSlice < 0) newSlice = 0;
+                if (newSlice >= this._maxSlices) newSlice = this._maxSlices - 1;
+
+                if (newSlice !== this._currentSlice) {
+                    this._currentSlice = newSlice;
+                    this.$('.g-nifti-slider').val(newSlice);
+                    this._setSlice(newSlice);
+                }
+            });
+            slider._wheelListenerAttached = true;
+        }
 
         // Update metadata widget with volume info
         this._sliceMetadataWidget
@@ -428,6 +469,60 @@ const NiftiView = View.extend({
             }
 
             this._updateSliceLabel();
+        }
+    },
+
+    /**
+     * Handle slice change from mouse wheel navigation
+     * Updates slider and label to reflect Niivue's current position
+     */
+    _onSliceChangeFromWheel: function (sliceIndex) {
+        this._currentSlice = sliceIndex;
+
+        // Update slider position
+        this.$('.g-nifti-slider').val(sliceIndex);
+
+        // Update label
+        this._updateSliceLabel();
+    },
+
+    // Window/Level controls
+    _toggleWindowLevelPanel: function () {
+        this._windowLevelPanelVisible = !this._windowLevelPanelVisible;
+
+        const $controls = this.$('.g-nifti-wl-controls');
+        const $toggleIcon = this.$('.g-nifti-wl-toggle i');
+
+        if (this._windowLevelPanelVisible) {
+            $controls.slideDown(200);
+            $toggleIcon.removeClass('icon-angle-down').addClass('icon-angle-up');
+
+            // Enable sliders
+            this.$('.g-nifti-window-slider').prop('disabled', false);
+            this.$('.g-nifti-level-slider').prop('disabled', false);
+        } else {
+            $controls.slideUp(200);
+            $toggleIcon.removeClass('icon-angle-up').addClass('icon-angle-down');
+        }
+    },
+
+    _onWindowChange: function (e) {
+        const window = parseInt(e.target.value);
+        this._currentWindow = window;
+        this.$('.g-nifti-window-value').text(window);
+        this._debouncedWindowHandler(window);
+    },
+
+    _onLevelChange: function (e) {
+        const level = parseInt(e.target.value);
+        this._currentLevel = level;
+        this.$('.g-nifti-level-value').text(level);
+        this._debouncedLevelHandler(level);
+    },
+
+    _applyWindowLevel: function (level, window) {
+        if (this._sliceImageWidget) {
+            this._sliceImageWidget.setWindowLevel(level, window);
         }
     },
 

@@ -30,9 +30,16 @@ const NiftiSliceImageWidget = View.extend({
 
     destroy: function () {
         if (this.nv) {
-            // Properly cleanup Niivue volumes
+            // FIX: Properly cleanup Niivue volumes usando removeVolumeByIndex
             if (this.nv.volumes && this.nv.volumes.length > 0) {
-                this.nv.closeAllVolumes();
+                // Rimuovi tutti i volumi dalla fine all'inizio
+                for (let i = this.nv.volumes.length - 1; i >= 0; i--) {
+                    try {
+                        this.nv.removeVolumeByIndex(i);
+                    } catch (e) {
+                        console.warn('Error removing volume:', e);
+                    }
+                }
             }
             this.nv = null;
         }
@@ -159,10 +166,19 @@ const NiftiSliceImageWidget = View.extend({
             multiplanarForceRender: false,
             sliceType: this._getSliceType(),
             isRadiologicalConvention: true,
-            logging: false
+            logging: false,
+            // FIX: Usa dragMode pan per permettere spostamento con tasto destro
+            // 0 = none, 1 = contrast (windowing), 2 = measurement, 3 = pan
+            dragMode: 3  // pan mode: tasto destro sposta l'immagine senza windowing
         });
 
         this.nv.attachToCanvas(canvas);
+
+        // Previeni il menu contestuale del browser sul tasto destro
+        canvas.addEventListener('contextmenu', (e) => {
+            e.preventDefault();
+            return false;
+        });
 
         // Load volume if buffer or URL is set (prefer buffer for caching)
         if (this.volumeBuffer || this.volumeUrl) {
@@ -345,8 +361,10 @@ const NiftiSliceImageWidget = View.extend({
      */
     zoomIn: function () {
         if (this.nv) {
-            // FIX: Usa scene.volScaleMultiplier invece di pan2Dxyzmm
-            this.nv.scene.volScaleMultiplier *= NIFTI_CONFIG.ZOOM_IN_FACTOR;
+            // FIX: Per le slice 2D, Niivue usa pan2Dxyzmm[3] per lo zoom
+            // setScale() è solo per il rendering 3D
+            const currentZoom = this.nv.scene.pan2Dxyzmm[3];
+            this.nv.scene.pan2Dxyzmm[3] = currentZoom * NIFTI_CONFIG.ZOOM_IN_FACTOR;
             this.nv.drawScene();
         }
         return this;
@@ -357,8 +375,9 @@ const NiftiSliceImageWidget = View.extend({
      */
     zoomOut: function () {
         if (this.nv) {
-            // FIX: Usa scene.volScaleMultiplier invece di pan2Dxyzmm
-            this.nv.scene.volScaleMultiplier *= NIFTI_CONFIG.ZOOM_OUT_FACTOR;
+            // FIX: Per le slice 2D, Niivue usa pan2Dxyzmm[3] per lo zoom
+            const currentZoom = this.nv.scene.pan2Dxyzmm[3];
+            this.nv.scene.pan2Dxyzmm[3] = currentZoom * NIFTI_CONFIG.ZOOM_OUT_FACTOR;
             this.nv.drawScene();
         }
         return this;
@@ -369,8 +388,10 @@ const NiftiSliceImageWidget = View.extend({
      */
     resetZoom: function () {
         if (this.nv) {
-            // FIX: Reset volScaleMultiplier a 1.0
-            this.nv.scene.volScaleMultiplier = 1.0;
+            // FIX: Reset zoom 2D a 1.0 e ripristina anche la posizione (pan)
+            // pan2Dxyzmm = [x, y, z, zoom]
+            // Resetta tutto a [0, 0, 0, 1.0]
+            this.nv.scene.pan2Dxyzmm = [0, 0, 0, 1.0];
             this.nv.drawScene();
         }
         return this;

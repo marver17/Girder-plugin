@@ -151,37 +151,73 @@ def test_parse_nifti_with_json(server, user, admin, folder, sample_nifti_file, s
     assert item['nifti']['files']['json'] is not None
 
 
-def test_nifti_search_handler(server, admin, folder, sample_nifti_file):
-    """Test the NIfTI search handler."""
+def test_nifti_search_handler(server, admin, folder, sample_nifti_file, sample_json_metadata):
+    """Test comprehensive metadata search handler."""
     from girder_nifti_viewer import niftiSubstringSearchHandler
-    
-    # Create and parse a NIfTI item
+
+    # Crea item NIfTI con metadati JSON
     item = Item().createItem('searchable_nifti', admin, folder)
+
+    # Upload file NIfTI
     Upload().uploadFromFile(
         sample_nifti_file,
         size=len(sample_nifti_file.getvalue()),
-        name='brain_t1.nii.gz',
+        name='brain_t1_mprage.nii.gz',
         parentType='item',
         parent=item,
         user=admin
     )
-    
-    # Parse it
+
+    # Upload metadati JSON
+    json_bio = io.BytesIO(sample_json_metadata)
+    Upload().uploadFromFile(
+        json_bio,
+        size=len(sample_json_metadata),
+        name='brain_t1_mprage.json',
+        parentType='item',
+        parent=item,
+        user=admin
+    )
+
+    # Parse
     server.request(
         path=f'/item/{item["_id"]}/parseNifti',
         method='POST',
         user=admin
     )
-    
-    # Search for the item
+
+    # Test 1: Ricerca per filename
     results = niftiSubstringSearchHandler(
-        query='brain',
-        types=['item'],
-        user=admin,
-        level=None
+        query='brain', types=['item'], user=admin, level=None
     )
-    
-    # Verify search results
+    assert len(results) > 0
+    assert any(r['document']['_id'] == item['_id'] for r in results)
+
+    # Test 2: Ricerca per BIDS ProtocolName
+    results = niftiSubstringSearchHandler(
+        query='T1_MPRAGE', types=['item'], user=admin, level=None
+    )
+    assert len(results) > 0
+    assert any(r['document']['_id'] == item['_id'] for r in results)
+
+    # Test 3: Ricerca per BIDS Manufacturer
+    results = niftiSubstringSearchHandler(
+        query='TestScanner', types=['item'], user=admin, level=None
+    )
+    assert len(results) > 0
+    assert any(r['document']['_id'] == item['_id'] for r in results)
+
+    # Test 4: Ricerca case-insensitive
+    results = niftiSubstringSearchHandler(
+        query='mprage', types=['item'], user=admin, level=None
+    )
+    assert len(results) > 0
+    assert any(r['document']['_id'] == item['_id'] for r in results)
+
+    # Test 5: Ricerca valore numerico nelle dimensioni
+    results = niftiSubstringSearchHandler(
+        query='64', types=['item'], user=admin, level=None
+    )
     assert len(results) > 0
     assert any(r['document']['_id'] == item['_id'] for r in results)
 

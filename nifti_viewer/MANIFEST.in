@@ -1,4 +1,13 @@
+# Include README and CHANGELOG
+include README.md
+include CHANGELOG.md
+include LICENSE
+
+# Include only built frontend files, exclude source
 prune girder_nifti_viewer/web_client
 include girder_nifti_viewer/web_client/dist/girder-plugin-nifti-viewer.umd.cjs
 include girder_nifti_viewer/web_client/dist/girder-plugin-nifti-viewer.js
 include girder_nifti_viewer/web_client/dist/style.css
+
+# Include package.json for frontend metadata
+include girder_nifti_viewer/web_client/package.json

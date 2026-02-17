@@ -1,0 +1,45 @@
+[build-system]
+requires = ["setuptools>=61.0", "setuptools_scm>=6.2"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "girder-nifti-qc"
+version = "0.1.0"
+description = "NIfTI Quality Control using MRIQC via Girder Worker"
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "Apache-2.0"}
+authors = [
+    {name = "Your Organization", email = "contact@example.com"}
+]
+keywords = ["girder", "nifti", "mriqc", "quality-control", "neuroimaging"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Web Environment",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Topic :: Scientific/Engineering :: Medical Science Apps.",
+]
+
+dependencies = [
+    "girder>=5.0.0a1",
+    "girder-worker>=5.0.0a1",
+    "girder-plugin-worker>=5.0.0a1",
+    "girder-client>=5.0.0a1",
+    "nibabel>=5.2.0",
+    "numpy>=1.24.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "pytest-girder>=3.0",
+]
+
+[project.entry-points."girder.plugin"]
+nifti_qc = "girder_nifti_qc:NiftiQCPlugin"
+
+[project.entry-points."girder_worker_plugins"]
+nifti_qc_tasks = "girder_nifti_qc.tasks:load_worker_plugin"

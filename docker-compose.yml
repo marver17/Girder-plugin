@@ -35,6 +35,27 @@ services:
       retries: 5
       start_period: 5s
 
+  rabbitmq:
+    image: rabbitmq:3-management-alpine
+    container_name: girder-dev-rabbitmq
+    networks:
+      - girder-dev-net
+    restart: unless-stopped
+    ports:
+      - "5672:5672" # AMQP protocol
+      - "15672:15672" # Management UI
+    environment:
+      - RABBITMQ_DEFAULT_USER=girder
+      - RABBITMQ_DEFAULT_PASS=girder
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+
   # Girder Development
   girder:
     build:
@@ -48,9 +69,14 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
     environment:
       - GIRDER_MONGO_URI=mongodb://mongodb:27017/girder
       - GIRDER_REDIS_URL=redis://redis:6379
+      - BROKER_URL=amqp://girder:girder@rabbitmq:5672//
+      - CELERY_BROKER_URL=amqp://girder:girder@rabbitmq:5672//
+      - CELERY_RESULT_BACKEND=mongodb://mongodb:27017/girder
       - PYTHONUNBUFFERED=1
     volumes:
       - .:/workspace
@@ -78,6 +104,8 @@ networks:
 volumes:
   mongodb_data:
     name: girder-dev-mongodb
+  rabbitmq_data:
+    name: girder-dev-rabbitmq
   girder_data:
     name: girder-dev-data
   girder_node_modules:

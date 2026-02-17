@@ -45,7 +45,7 @@ WORKDIR /girder
 
 # Configurare ownership per girder e workspace
 RUN mkdir -p /home/girder/.local/share/girder /workspace && \
-    chown -R girder:girder /girder /home/girder /workspace
+    chown -R girder:girder /girder /home/girder /workspace 
 
 RUN git clone --branch v4-integration --single-branch https://github.com/girder/girder.git /girder
 

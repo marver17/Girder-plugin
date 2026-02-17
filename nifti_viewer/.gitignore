@@ -44,10 +44,19 @@ package-lock.json
 .npm
 
 # Build outputs
-girder_nifti_viewer/web_client/dist/*.js
-girder_nifti_viewer/web_client/dist/*.css
-girder_nifti_viewer/web_client/dist/*.map
-!girder_nifti_viewer/web_client/dist/.gitkeep
+# IMPORTANT: dist/ files are now TRACKED in git to ensure compiled code is always available
+# This provides a fallback if automatic builds fail during Docker build
+# The Dockerfile still builds automatically as a secondary measure (for fresh compilation)
+#
+# When you modify frontend code, remember to:
+# 1. npm run build
+# 2. git add girder_nifti_viewer/web_client/dist/
+# 3. git commit with both source and compiled changes
+#
+# girder_nifti_viewer/web_client/dist/*.js
+# girder_nifti_viewer/web_client/dist/*.css
+# girder_nifti_viewer/web_client/dist/*.map
+# !girder_nifti_viewer/web_client/dist/.gitkeep
 
 # Testing
 .pytest_cache/

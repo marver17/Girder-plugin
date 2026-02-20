@@ -8,8 +8,7 @@ const ItemViewExtension = {
      */
     addQCButton(itemView) {
         const itemId = itemView.model.id;
-        const status = itemView.model.get('nifti_qc_status');
-        
+
         // Create button container
         const buttonContainer = $(`
             <div class="g-nifti-qc-controls" style="margin: 15px 0;">
@@ -40,16 +39,6 @@ const ItemViewExtension = {
         mriqcBtn.on('click', () => {
             ItemViewExtension.runMRIQC(itemView, itemId);
         });
-        
-        // Show status if processing
-        if (status === 'processing') {
-            const statusBadge = $(`
-                <span class="label label-warning" style="margin-left: 10px;">
-                    <i class="icon-spin4 animate-spin"></i> Processing...
-                </span>
-            `);
-            buttonContainer.append(statusBadge);
-        }
         
         buttonContainer.append(quickCheckBtn, ' ', mriqcBtn);
         
@@ -145,12 +134,14 @@ const ItemViewExtension = {
             const participantLabel = dialog.find('#participant-label').val();
             const modality = dialog.find('#modality').val();
             const timeout = parseInt(dialog.find('#timeout').val());
-            
+
             dialog.modal('hide');
-            
+            dialog.on('hidden.bs.modal', () => dialog.remove());
+
             ItemViewExtension.executeMRIQC(itemView, itemId, participantLabel, modality, timeout);
         });
-        
+
+        $('body').append(dialog);
         dialog.modal('show');
     },
     
@@ -199,26 +190,35 @@ const ItemViewExtension = {
     },
     
     /**
-     * Poll item for QC results
+     * Poll item for QC results.
+     * When complete, updates the model and triggers a targeted UI update
+     * without destroying the NIfTI viewer (no full itemView.render()).
      */
     pollForResults(itemView, itemId, interval) {
         let pollCount = 0;
         const maxPolls = 120; // 30 minutes with 15s intervals
-        
+
         const checkResults = () => {
             pollCount++;
-            
+
             restRequest({
                 url: `item/${itemId}`,
                 method: 'GET'
             }).done((item) => {
-                const status = item.nifti_qc_status;
-                
+                // Girder exposes metadata fields as top-level via exposeFields.
+                // Fallback to item.meta if the server hasn't restarted yet.
+                const status = item.nifti_qc_status || item.meta?.nifti_qc_status;
+                const qcResults = item.nifti_qc_results || item.meta?.nifti_qc_results;
+                console.log('[QC Poll] status:', status, '| nifti_qc_results:', qcResults, '| raw meta:', item.meta);
+
                 if (status === 'completed' || status === 'quick_check_completed') {
-                    // Results ready!
-                    itemView.model.set(item);
-                    itemView.render();
-                    
+                    // Update model with new fields (triggers Backbone change events)
+                    // This triggers listenTo in NiftiView which calls _renderExtensionWidgets()
+                    itemView.model.set({
+                        nifti_qc_results: qcResults,
+                        nifti_qc_status: status
+                    });
+
                     events.trigger('g:alert', {
                         icon: 'ok',
                         text: 'Quality control completed!',
@@ -226,89 +226,22 @@ const ItemViewExtension = {
                         timeout: 4000
                     });
                 } else if (status === 'error') {
-                    itemView.$('.g-qc-processing-badge').remove();
-                    
                     events.trigger('g:alert', {
                         icon: 'cancel',
                         text: 'QC processing failed. Check item metadata for details.',
                         type: 'danger',
                         timeout: 5000
                     });
-                } else if (pollCount < maxPolls && (status === 'processing' || !status)) {
-                    // Keep polling
+                } else if (pollCount < maxPolls) {
+                    // Continue polling: status is 'processing', undefined, or unknown
                     setTimeout(checkResults, interval);
                 }
             });
         };
-        
+
         setTimeout(checkResults, interval);
     },
     
-    /**
-     * Display QC results if available
-     */
-    showQCResults(itemView) {
-        const results = itemView.model.get('nifti_qc_results');
-        const status = itemView.model.get('nifti_qc_status');
-        
-        if (!results) return;
-        
-        const resultsDiv = $(`
-            <div class="g-nifti-qc-results" style="margin: 15px 0; padding: 15px; background: #f8f9fa; border-radius: 4px; border-left: 4px solid #28a745;">
-                <h4><i class="icon-ok-circled" style="color: #28a745;"></i> QC Results Available</h4>
-            </div>
-        `);
-        
-        // Quick check results
-        if (results.type === 'quick_check' && results.quick_check) {
-            const qc = results.quick_check;
-            resultsDiv.append(`
-                <table class="table table-condensed table-striped" style="background: white;">
-                    <tr><th>Shape:</th><td>${qc.shape.join(' × ')}</td></tr>
-                    <tr><th>Voxel Size:</th><td>${qc.voxel_size_mm.map(v => v.toFixed(2)).join(' × ')} mm</td></tr>
-                    <tr><th>Orientation:</th><td>${qc.orientation.join(', ')}</td></tr>
-                    <tr><th>Data Range:</th><td>${qc.data_range.min.toFixed(2)} to ${qc.data_range.max.toFixed(2)}</td></tr>
-                    <tr><th>Mean:</th><td>${qc.data_range.mean.toFixed(2)} ± ${qc.data_range.std.toFixed(2)}</td></tr>
-                </table>
-                <small class="text-muted"><i class="icon-clock"></i> ${new Date(results.timestamp).toLocaleString()}</small>
-            `);
-        }
-        
-        // MRIQC results
-        if (results.metrics && Object.keys(results.metrics).length > 0) {
-            const metrics = results.metrics;
-            const keyMetrics = ['snr_total', 'cnr', 'fber', 'efc', 'fwhm_avg'];
-            
-            let metricsHtml = '<h5>Key Quality Metrics:</h5><table class="table table-condensed table-striped" style="background: white;">';
-            
-            keyMetrics.forEach(key => {
-                if (metrics[key] !== undefined) {
-                    const label = key.toUpperCase().replace('_', ' ');
-                    const value = typeof metrics[key] === 'number' ? metrics[key].toFixed(3) : metrics[key];
-                    metricsHtml += `<tr><th>${label}:</th><td>${value}</td></tr>`;
-                }
-            });
-            
-            metricsHtml += '</table>';
-            resultsDiv.append(metricsHtml);
-            
-            if (results.file_name) {
-                resultsDiv.append(`
-                    <p><strong>Analyzed File:</strong> ${results.file_name}</p>
-                    <p><strong>Modality:</strong> ${results.modality || 'N/A'}</p>
-                `);
-            }
-            
-            resultsDiv.append(`
-                <small class="text-muted">
-                    <i class="icon-clock"></i> ${new Date(results.timestamp).toLocaleString()}
-                    | MRIQC version: ${results.mriqc_version || 'unknown'}
-                </small>
-            `);
-        }
-        
-        itemView.$('.g-item-info').after(resultsDiv);
-    }
 };
 
 export default ItemViewExtension;

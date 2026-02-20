@@ -11,7 +11,6 @@ wrap(ItemView, 'render', function (render) {
         // Always show QC buttons for testing
         if (this.model && this.model.get('_modelType') === 'item') {
             ItemViewExtension.addQCButton(this);
-            ItemViewExtension.showQCResults(this);
         }
     });
     
@@ -26,8 +25,10 @@ function _registerQCWidget(registry) {
         component: QCMetricsWidget,
         priority: 10, // High priority - show first
         shouldRender: (item) => {
-            // Only render if item has QC results
-            return item.get('nifti_qc_results') !== undefined;
+            const qcResults = item.get('nifti_qc_results');
+            const qcStatus = item.get('nifti_qc_status');
+            console.log('[QC Widget] shouldRender check — nifti_qc_results:', qcResults, '| nifti_qc_status:', qcStatus);
+            return qcResults !== undefined;
         }
     });
 

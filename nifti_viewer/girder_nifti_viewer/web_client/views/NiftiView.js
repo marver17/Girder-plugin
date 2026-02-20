@@ -1,5 +1,6 @@
 import View from '@girder/core/views/View';
 import { restRequest } from '@girder/core/rest';
+import events from '@girder/core/events';
 
 import NiftiFileModel from '../models/NiftiFileModel';
 import NiftiSliceImageWidget from './NiftiSliceImageWidget';
@@ -178,6 +179,42 @@ const NiftiView = View.extend({
         this._debouncedLevelHandler = debounce((level) => {
             this._applyWindowLevel(level, this._currentWindow);
         }, 50);
+
+        // Re-render extension widgets when QC results change (e.g. after polling updates the model)
+        this.listenTo(this.item, 'change:nifti_qc_results', () => {
+            this._renderExtensionWidgets();
+        });
+
+        // If QC results are not yet in the model, fetch them from the REST API.
+        // This handles the case where the item was already processed and the page
+        // is opened fresh — the model may not have nifti_qc_results loaded yet.
+        if (!this.item.get('nifti_qc_results')) {
+            restRequest({
+                url: `item/${this.item.id}`,
+                method: 'GET'
+            }).done((itemData) => {
+                // Support both exposeFields top-level and item.meta fallback
+                const qcResults = itemData.nifti_qc_results || itemData.meta?.nifti_qc_results;
+                const qcStatus = itemData.nifti_qc_status || itemData.meta?.nifti_qc_status;
+                console.log('[NIfTI Viewer] QC fetch — nifti_qc_results:', qcResults, '| nifti_qc_status:', qcStatus, '| raw meta:', itemData.meta);
+                if (qcResults) {
+                    console.log('[NIfTI Viewer] Found existing QC results, updating model');
+                    this.item.set({
+                        nifti_qc_results: qcResults,
+                        nifti_qc_status: qcStatus
+                    });
+                    // listenTo above will trigger _renderExtensionWidgets
+                }
+            });
+        }
+
+        // Re-render extension widgets if a plugin registers after this view is already rendered
+        this._onWidgetRegistered = () => {
+            if (this._rendered) {
+                this._renderExtensionWidgets();
+            }
+        };
+        events.on('nifti_viewer:widgets:register', this._onWidgetRegistered);
     },
 
     _onSliderInput: function (e) {
@@ -274,6 +311,7 @@ const NiftiView = View.extend({
         // Load JSON sidecar if available
         this._loadJsonMetadata();
 
+        this._rendered = true;
         return this;
     },
 
@@ -574,37 +612,38 @@ const NiftiView = View.extend({
         
         // Render each widget
         widgets.forEach(widgetConfig => {
-            // Create wrapper div for this widget
-            const $widgetWrapper = $('<div>')
-                .addClass('g-nifti-extension-widget')
-                .attr('data-widget-id', widgetConfig.id)
-                .appendTo($widgetContainer);
-            
+            // Create wrapper using native DOM — avoid importing jQuery which Vite
+            // bundles as a separate instance incompatible with Girder's jQuery DOM.
+            const wrapperEl = document.createElement('div');
+            wrapperEl.className = 'g-nifti-extension-widget';
+            wrapperEl.setAttribute('data-widget-id', widgetConfig.id);
+            $widgetContainer[0].appendChild(wrapperEl);
+
             try {
-                // Instantiate widget
+                // Instantiate widget with native el — Backbone accepts DOM elements
                 const widget = new widgetConfig.component({
-                    el: $widgetWrapper,
+                    el: wrapperEl,
                     parentView: this,
                     item: this.item,
                     widgetConfig: widgetConfig
                 });
-                
+
                 // Render widget
                 widget.render();
-                
+
                 // Track for cleanup
                 this._extensionWidgets.push(widget);
-                
+
                 console.log(`[NIfTI Viewer] Rendered widget: ${widgetConfig.id}`);
             } catch (error) {
                 console.error(`[NIfTI Viewer] Failed to render widget ${widgetConfig.id}:`, error);
-                $widgetWrapper.html(`
+                wrapperEl.innerHTML = `
                     <div class="alert alert-danger">
                         <i class="icon-cancel"></i>
                         <strong>Widget Error: ${widgetConfig.title}</strong>
                         <p>${error.message}</p>
                     </div>
-                `);
+                `;
             }
         });
     },
@@ -645,7 +684,7 @@ const NiftiView = View.extend({
         if (this._sliceMetadataWidget) {
             this._sliceMetadataWidget.destroy();
         }
-        
+
         // Clean up extension widgets
         if (this._extensionWidgets) {
             this._extensionWidgets.forEach(widget => {
@@ -654,6 +693,11 @@ const NiftiView = View.extend({
                 }
             });
             this._extensionWidgets = [];
+        }
+
+        // Remove widget registration listener
+        if (this._onWidgetRegistered) {
+            events.off('nifti_viewer:widgets:register', this._onWidgetRegistered);
         }
 
         // Clear cached volume if needed (optional - can keep for reuse)

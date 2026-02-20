@@ -92,6 +92,21 @@ class NiftiQC(Resource):
         file_obj = File().load(fileId, force=True)
         file_name = file_obj.get("name", "unknown") if file_obj else "unknown"
 
+        # VERSION CHECK
+        REST_VERSION = "2026-02-20 runMRIQC"
+        print(f"========================================")
+        print(f"REST VERSION: {REST_VERSION}")
+        print(f"========================================")
+        print(f"DEBUG REST runMRIQC: item_id={str(item['_id'])}")
+        print(f"DEBUG REST runMRIQC: file_id={fileId}")
+        print(f"DEBUG REST runMRIQC: file_name={file_name}")
+        print(f"DEBUG REST runMRIQC: modality={modality}")
+        print(f"DEBUG REST runMRIQC: participantLabel={participantLabel}")
+        print(f"DEBUG REST runMRIQC: timeout={timeout}")
+        print(f"DEBUG REST runMRIQC: token={str(token['_id'])}")
+        print(f"DEBUG REST runMRIQC: api_url={getApiUrl()}")
+        print(f"DEBUG REST runMRIQC: About to call apply_async")
+
         # Mark item as processing
         Item().setMetadata(
             item,
@@ -102,20 +117,27 @@ class NiftiQC(Resource):
         )
 
         # Launch Celery task - pass all parameters including token
-        celery_job = run_mriqc_task.apply_async(
-            kwargs={
-                "item_id": str(item["_id"]),
-                "file_id": fileId,
-                "participant_label": participantLabel,
-                "modality": modality,
-                "timeout": timeout,
-                "file_name": file_name,
-                "girder_client_token": str(token["_id"]),
-                "girder_api_url": getApiUrl(),
-            },
-            # Job title as girder_worker option
-            girder_job_title=f"MRIQC: {file_name} ({modality}, sub-{participantLabel})",
-        )
+        try:
+            celery_job = run_mriqc_task.apply_async(
+                kwargs={
+                    "item_id": str(item["_id"]),
+                    "file_id": fileId,
+                    "participant_label": participantLabel,
+                    "modality": modality,
+                    "timeout": timeout,
+                    "file_name": file_name,
+                    "girder_client_token": str(token["_id"]),
+                    "girder_api_url": getApiUrl(),
+                },
+                # Job title as girder_worker option
+                girder_job_title=f"MRIQC: {file_name} ({modality}, sub-{participantLabel})",
+            )
+            print(f"DEBUG REST runMRIQC: apply_async success, celery_id={celery_job.id}")
+        except Exception as e:
+            print(f"DEBUG REST runMRIQC: apply_async FAILED: {e}")
+            import traceback
+            print(traceback.format_exc())
+            raise RestException(f"Failed to submit MRIQC job: {e}", code=500)
 
         return {
             "celery_id": celery_job.id,

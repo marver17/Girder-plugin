@@ -190,18 +190,21 @@ def run_mriqc_task(task, **kwargs):
             )
 
             # Update item metadata
-            item = gc.get(f"item/{item_id}")
-            item["nifti_qc_results"] = {
-                "metrics": qc_results["metrics"],
-                "timestamp": datetime.datetime.utcnow().isoformat(),
-                "mriqc_version": _get_mriqc_version(),
-                "participant_label": participant_label,
-                "modality": modality,
-                "file_id": file_id,
-                "file_name": filename,
-            }
-            item["nifti_qc_status"] = "completed"
-            gc.put(f"item/{item_id}", json=item)
+            gc.put(
+                f"item/{item_id}/metadata",
+                json={
+                    "nifti_qc_results": {
+                        "metrics": qc_results["metrics"],
+                        "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                        "mriqc_version": _get_mriqc_version(),
+                        "participant_label": participant_label,
+                        "modality": modality,
+                        "file_id": file_id,
+                        "file_name": filename,
+                    },
+                    "nifti_qc_status": "completed",
+                },
+            )
 
             task.job_manager.updateProgress(
                 message="Quality control completed successfully!", current=100
@@ -238,15 +241,6 @@ def quick_nifti_check(task, **kwargs):
     """
     Simple task to verify NIfTI structure without running full MRIQC
     Useful for testing and quick validation
-
-    Args:
-        task: Celery task instance (injected by bind=True)
-        **kwargs: All parameters including:
-            - item_id (str): Girder item ID
-            - file_id (str): Girder file ID for the NIfTI file
-            - file_name (str): Name of the file
-            - girder_client_token (str): Authentication token for Girder API
-            - girder_api_url (str): Girder API URL
     """
     import datetime
 
@@ -254,68 +248,41 @@ def quick_nifti_check(task, **kwargs):
     import numpy as np
     from girder_client import GirderClient
 
-    # VERSION CHECK - per vedere se il codice viene ricaricato
-    VERSION_TIMESTAMP = "2026-02-17 12:30:00"
-    print(f"========================================")
-    print(f"TASK VERSION: {VERSION_TIMESTAMP}")
-    print(f"========================================")
+    def safe_progress(message, current=None, total=None):
+        """Aggiorna il progresso del job senza bloccare il task se fallisce."""
+        print(f"[quick_nifti_check] {message}")
+        try:
+            kwargs_ = {"message": message}
+            if current is not None:
+                kwargs_["current"] = current
+            if total is not None:
+                kwargs_["total"] = total
+            task.job_manager.updateProgress(**kwargs_)
+        except Exception as e:
+            print(f"[quick_nifti_check] updateProgress failed (non-fatal): {e}")
 
-    # DEBUG: Verifica cosa arriva al task
-    print(f"DEBUG TASK: All kwargs: {kwargs}")
-    print(f"DEBUG TASK: kwargs keys: {list(kwargs.keys())}")
-
-    # Verifica tutti gli attributi di task.request
-    all_attrs = dir(task.request)
-    print(f"DEBUG TASK: task.request ALL attributes: {all_attrs}")
-
-    # Verifica specificamente i parametri girder
-    for attr in [
-        "girder_client_token",
-        "girder_api_url",
-        "girder_user",
-        "girder_job_title",
-    ]:
-        val = getattr(task.request, attr, "NOT_FOUND")
-        print(f"DEBUG TASK: task.request.{attr} = {val}")
-
-    # Extract  parameters from kwargs (non-reserved)
+    # Estrai parametri dal task
     item_id = kwargs.get("item_id")
     file_id = kwargs.get("file_id")
     file_name = kwargs.get("file_name", "unknown file")
-
-    # Extract reserved parameters from task.request (girder_worker moves them there)
     girder_client_token = getattr(task.request, "girder_client_token", None)
-    girder_api_url = getattr(
-        task.request, "girder_api_url", "http://localhost:8080/api/v1"
-    )
+    girder_api_url = getattr(task.request, "girder_api_url", "http://localhost:8080/api/v1")
 
-    print(f"DEBUG TASK: EXTRACTED: item_id={item_id}, file_id={file_id}")
-    print(
-        f"DEBUG TASK: EXTRACTED: token={girder_client_token}, api_url={girder_api_url}"
-    )
-    print(
-        f"DEBUG TASK: Creating GirderClient with token={girder_client_token}, url={girder_api_url}"
-    )
+    print(f"[quick_nifti_check] Starting: item={item_id}, file={file_name}")
 
-    # Create Girder client manually with token
     gc = GirderClient(apiUrl=girder_api_url)
     gc.token = girder_client_token
 
-    # The @girder_job decorator handles job status updates automatically
-
     try:
-        # Update job title with file name
-        task.job_manager.updateProgress(
-            message=f"Quick check: {file_name}", total=100, current=5
-        )
-
-        task.job_manager.updateProgress(message="Downloading file...", current=20)
+        safe_progress(f"Quick check: {file_name}", total=100, current=5)
+        safe_progress("Downloading file...", current=20)
 
         with tempfile.TemporaryDirectory() as tmpdir:
             nifti_file = Path(tmpdir) / "temp.nii.gz"
             gc.downloadFile(file_id, str(nifti_file))
+            print(f"[quick_nifti_check] File downloaded: {nifti_file}")
 
-            task.job_manager.updateProgress(message="Analyzing NIfTI...", current=50)
+            safe_progress("Analyzing NIfTI...", current=50)
 
             img = nib.load(str(nifti_file))
             header = img.header
@@ -332,51 +299,46 @@ def quick_nifti_check(task, **kwargs):
                     "mean": float(np.mean(data)),
                     "std": float(np.std(data)),
                 },
-                "header_info": {
-                    "descrip": str(header.get("descrip", b"")),
-                    "qform_code": int(header["qform_code"]),
-                    "sform_code": int(header["sform_code"]),
-                },
             }
+            print(f"[quick_nifti_check] Analysis done: shape={info['shape']}")
 
-            task.job_manager.updateProgress(message="Saving results...", current=80)
+            safe_progress("Saving results...", current=80)
 
-            item = gc.get(f"item/{item_id}")
-            item["nifti_qc_results"] = {
+            qc_results = {
                 "quick_check": info,
-                "timestamp": datetime.datetime.utcnow().isoformat(),
+                "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
                 "type": "quick_check",
             }
-            item["nifti_qc_status"] = "quick_check_completed"
-            gc.put(f"item/{item_id}", json=item)
+            gc.put(
+                f"item/{item_id}/metadata",
+                json={
+                    "nifti_qc_results": qc_results,
+                    "nifti_qc_status": "quick_check_completed",
+                },
+            )
+            print(f"[quick_nifti_check] Results saved to item {item_id}")
 
-            task.job_manager.updateProgress(message="Done!", current=100)
-
-            # The @girder_job decorator handles job completion automatically
-
+            safe_progress("Done!", current=100)
             return {"status": "success", "info": info}
 
     except Exception as e:
-        # Log error
-        error_msg = f"Quick check failed: {str(e)}"
-        task.job_manager.updateProgress(message=error_msg, current=100)
-
-        # The @girder_job decorator handles job failure automatically
-
-        # Update item with error status
+        import traceback
+        print(f"[quick_nifti_check] ERROR: {e}")
+        print(traceback.format_exc())
+        safe_progress(f"Quick check failed: {e}", current=100)
         try:
-            item = gc.get(f"item/{item_id}")
-            item["nifti_qc_status"] = "error"
-            item["nifti_qc_error"] = {
-                "message": str(e),
-                "timestamp": datetime.datetime.utcnow().isoformat(),
-                "type": "quick_check_error",
-            }
-            gc.put(f"item/{item_id}", json=item)
-        except:
-            pass  # Fail silently if we can't update item
-
-        # Re-raise to mark job as failed
+            gc.put(
+                f"item/{item_id}/metadata",
+                json={
+                    "nifti_qc_status": "error",
+                    "nifti_qc_error": {
+                        "message": str(e),
+                        "timestamp": datetime.datetime.utcnow().isoformat(),
+                    },
+                },
+            )
+        except Exception:
+            pass
         raise
 
 
@@ -441,13 +403,15 @@ def _get_mriqc_version():
 def _update_item_error(gc, item_id, error_msg):
     """Update item with error status"""
     try:
-        item = gc.get(f"item/{item_id}")
-        item["nifti_qc_status"] = "error"
-        item["nifti_qc_error"] = {
-            "message": error_msg,
-            "timestamp": datetime.datetime.utcnow().isoformat(),
-        }
-        gc.put(f"item/{item_id}", json=item)
-    except:
-        pass
+        gc.put(
+            f"item/{item_id}/metadata",
+            json={
+                "nifti_qc_status": "error",
+                "nifti_qc_error": {
+                    "message": error_msg,
+                    "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                },
+            },
+        )
+    except Exception:
         pass

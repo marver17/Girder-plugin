@@ -74,6 +74,7 @@ services:
     environment:
       - GIRDER_MONGO_URI=mongodb://mongodb:27017/girder
       - GIRDER_REDIS_URL=redis://redis:6379
+      - GIRDER_NOTIFICATION_REDIS_URL=redis://redis:6379
       - BROKER_URL=amqp://girder:girder@rabbitmq:5672//
       - CELERY_BROKER_URL=amqp://girder:girder@rabbitmq:5672//
       - CELERY_RESULT_BACKEND=mongodb://mongodb:27017/girder

@@ -7,11 +7,13 @@ of NIfTI neuroimaging files using Girder Worker.
 
 from pathlib import Path
 
+from girder import events
 from girder.constants import AccessType
 from girder.models.item import Item
 from girder.plugin import GirderPlugin, registerPluginStaticContent
 
 from .rest import NiftiQC
+from .widget_provider import QCWidgetProvider
 
 
 class NiftiQCPlugin(GirderPlugin):
@@ -42,6 +44,34 @@ class NiftiQCPlugin(GirderPlugin):
             staticDir=Path(__file__).parent / "web_client" / "dist",
             tree=info["serverRoot"],
         )
+
+        # Register widget provider with NIfTI viewer
+        # Strategy: try both immediate registration and event binding
+        # This handles both cases: nifti_viewer loading before or after us
+        
+        widget_registered = False
+        
+        # Try immediate registration if nifti_viewer already loaded
+        if 'nifti_widget_registry' in info:
+            try:
+                register_func = info['nifti_widget_registry']['register_function']
+                register_func(QCWidgetProvider)
+                widget_registered = True
+                print("   - Widget provider: registered (immediate)")
+            except Exception as e:
+                print(f"   - Widget provider: immediate registration failed: {e}")
+        
+        # Also bind to event in case nifti_viewer loads after us
+        def _register_widget(event):
+            register_func = event.info.get('register_function')
+            if register_func:
+                try:
+                    register_func(QCWidgetProvider)
+                    print("   - Widget provider: registered (via event)")
+                except Exception as e:
+                    print(f"   - Widget provider: event registration failed: {e}")
+        
+        events.bind('nifti_viewer.register_widgets', 'nifti_qc', _register_widget)
 
         print(" NIfTI QC Plugin loaded successfully!")
         print("   - REST API: /api/v1/nifti_qc")

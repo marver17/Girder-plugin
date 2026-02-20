@@ -148,6 +148,7 @@ const NiftiView = View.extend({
         // View widgets
         this._sliceImageWidget = null;
         this._sliceMetadataWidget = null;
+        this._extensionWidgets = []; // Track extension widgets for cleanup
 
         // Navigation state
         this._currentOrientation = 'axial';
@@ -201,6 +202,12 @@ const NiftiView = View.extend({
         this._sliceMetadataWidget
             .setMetadata(this.niftiInfo.meta || {})
             .render();
+
+        // Load JSON sidecar if available
+        this._loadJsonMetadata();
+        
+        // Render extension widgets from registered plugins
+        this._renderExtensionWidgets();
 
         // Initialize image widget with Niivue
         this._sliceImageWidget = new NiftiSliceImageWidget({
@@ -526,6 +533,82 @@ const NiftiView = View.extend({
         }
     },
 
+    /**
+     * Render extension widgets from registered plugins
+     * 
+     * Queries the global widget registry for widgets that should be displayed
+     * for this item and renders them in the extension widgets container.
+     */
+    _renderExtensionWidgets: function () {
+        const registry = window.GirderPlugins?.NiftiWidgetRegistry;
+        if (!registry) {
+            console.log('[NIfTI Viewer] Widget registry not available');
+            return;
+        }
+        
+        // Get container element
+        const $widgetContainer = this.$('.g-nifti-extension-widgets');
+        if (!$widgetContainer.length) {
+            console.warn('[NIfTI Viewer] Extension widgets container not found');
+            return;
+        }
+        
+        // Clear existing widgets
+        $widgetContainer.empty();
+        this._extensionWidgets.forEach(widget => {
+            if (widget.destroy) {
+                widget.destroy();
+            }
+        });
+        this._extensionWidgets = [];
+        
+        // Get widgets that should render for this item
+        const widgets = registry.getWidgets(this.item);
+        
+        if (widgets.length === 0) {
+            console.log('[NIfTI Viewer] No extension widgets to render');
+            return;
+        }
+        
+        console.log(`[NIfTI Viewer] Rendering ${widgets.length} extension widget(s)`);
+        
+        // Render each widget
+        widgets.forEach(widgetConfig => {
+            // Create wrapper div for this widget
+            const $widgetWrapper = $('<div>')
+                .addClass('g-nifti-extension-widget')
+                .attr('data-widget-id', widgetConfig.id)
+                .appendTo($widgetContainer);
+            
+            try {
+                // Instantiate widget
+                const widget = new widgetConfig.component({
+                    el: $widgetWrapper,
+                    parentView: this,
+                    item: this.item,
+                    widgetConfig: widgetConfig
+                });
+                
+                // Render widget
+                widget.render();
+                
+                // Track for cleanup
+                this._extensionWidgets.push(widget);
+                
+                console.log(`[NIfTI Viewer] Rendered widget: ${widgetConfig.id}`);
+            } catch (error) {
+                console.error(`[NIfTI Viewer] Failed to render widget ${widgetConfig.id}:`, error);
+                $widgetWrapper.html(`
+                    <div class="alert alert-danger">
+                        <i class="icon-cancel"></i>
+                        <strong>Widget Error: ${widgetConfig.title}</strong>
+                        <p>${error.message}</p>
+                    </div>
+                `);
+            }
+        });
+    },
+
     _getErrorMessage: function (error) {
         // Parse error and return user-friendly message
         const errorStr = error.message || error.toString();
@@ -561,6 +644,16 @@ const NiftiView = View.extend({
         }
         if (this._sliceMetadataWidget) {
             this._sliceMetadataWidget.destroy();
+        }
+        
+        // Clean up extension widgets
+        if (this._extensionWidgets) {
+            this._extensionWidgets.forEach(widget => {
+                if (widget.destroy) {
+                    widget.destroy();
+                }
+            });
+            this._extensionWidgets = [];
         }
 
         // Clear cached volume if needed (optional - can keep for reuse)

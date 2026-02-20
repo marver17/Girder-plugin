@@ -79,12 +79,89 @@ const ItemViewExtension = {
     },
     
     /**
-     * Run MRIQC with parameters
+     * Infer BIDS parameters from item metadata.
+     * Returns { participantLabel, modality, confident }
+     * confident=true means both sub-label and modality extracted from BIDS filename → skip dialog
+     */
+    _inferMRIQCParams(itemView) {
+        const item = itemView.model.toJSON();
+        const nifti = item.nifti || item.meta?.nifti || {};
+        const niftiMeta = nifti.meta || {};
+        const jsonMeta = niftiMeta.json_metadata || {};
+        const files = nifti.files || [];
+        const fileName = files[0]?.name || item.name || '';
+
+        // Participant label — always inferred automatically, never shown to user
+        let participantLabel = '001';
+        const subMatch = fileName.match(/sub-([a-zA-Z0-9]+)/i);
+        if (subMatch) participantLabel = subMatch[1];
+        const prevQC = item.nifti_qc_results || item.meta?.nifti_qc_results;
+        if (prevQC?.participant_label) participantLabel = prevQC.participant_label;
+
+        // Modality inference
+        let modality = null;
+        let confident = false;
+
+        // 1. BIDS filename (most authoritative)
+        const modalityMatch = fileName.match(/[_.]?(T1w|T2w|bold|dwi|FLAIR|T2star)[._]/i);
+        if (modalityMatch) { modality = modalityMatch[1]; confident = true; }
+
+        // 2. Previous QC result
+        if (!modality && prevQC?.modality) modality = prevQC.modality;
+
+        // 3. JSON sidecar metadata (ProtocolName / SeriesDescription)
+        if (!modality) {
+            const desc = (jsonMeta.ProtocolName || jsonMeta.SeriesDescription || '').toLowerCase();
+            if (desc.match(/diff|dwi|dti/)) modality = 'dwi';
+            else if (desc.match(/bold|fmri|func/)) modality = 'bold';
+            else if (desc.match(/\bt2\b/)) modality = 'T2w';
+            else if (desc.match(/\bt1\b/)) modality = 'T1w';
+        }
+
+        // 4. 4D + RepetitionTime heuristic → bold/fMRI
+        if (!modality) {
+            const dims = niftiMeta.dimensions || [];
+            if (dims.length === 4 && dims[3] > 1 && jsonMeta.RepetitionTime) modality = 'bold';
+        }
+
+        if (!modality) modality = 'T1w';
+
+        return { participantLabel, modality, confident };
+    },
+
+    /**
+     * Run MRIQC: infer params from BIDS metadata.
+     * If filename is BIDS-complete → run directly (no dialog).
+     * Otherwise → show minimal modality selector pre-filled with inferred value.
      */
     runMRIQC(itemView, itemId) {
-        // Show dialog for parameters
-        const dialog = $(`
-            <div class="modal fade" tabindex="-1">
+        const { participantLabel, modality, confident } = ItemViewExtension._inferMRIQCParams(itemView);
+        const timeout = 1800;
+
+        if (confident) {
+            // BIDS filename complete — run directly without dialog
+            events.trigger('g:alert', {
+                icon: 'chart-bar',
+                text: `Starting MRIQC (${modality})...`,
+                type: 'info',
+                timeout: 3000
+            });
+            ItemViewExtension.executeMRIQC(itemView, itemId, participantLabel, modality, timeout);
+            return;
+        }
+
+        // Modality not certain — show minimal dialog with only modality selector
+        const $j = window.jQuery;
+        if (!$j) {
+            // window.jQuery unavailable: run with inferred defaults
+            ItemViewExtension.executeMRIQC(itemView, itemId, participantLabel, modality, timeout);
+            return;
+        }
+
+        $j('#g-mriqc-dialog').remove();
+
+        const $dialog = $j(`
+            <div class="modal fade" tabindex="-1" id="g-mriqc-dialog">
                 <div class="modal-dialog">
                     <div class="modal-content">
                         <div class="modal-header">
@@ -94,34 +171,20 @@ const ItemViewExtension = {
                             </h4>
                         </div>
                         <div class="modal-body">
-                            <p>This will run MRIQC quality control on your NIfTI file.</p>
-                            <p><strong>Note:</strong> Processing may take 5-30 minutes depending on file size.</p>
-                            
-                            <div class="form-group">
-                                <label>Participant Label</label>
-                                <input type="text" class="form-control" id="participant-label" value="001" placeholder="001">
-                                <small class="help-block">BIDS participant identifier (e.g., 001, sub001)</small>
-                            </div>
-                            
+                            <p>Select the MRI modality for this file:</p>
                             <div class="form-group">
                                 <label>Modality</label>
-                                <select class="form-control" id="modality">
+                                <select class="form-control" id="g-mriqc-modality">
                                     <option value="T1w">T1-weighted (T1w)</option>
                                     <option value="T2w">T2-weighted (T2w)</option>
                                     <option value="bold">BOLD fMRI</option>
                                     <option value="dwi">Diffusion (DWI)</option>
                                 </select>
                             </div>
-                            
-                            <div class="form-group">
-                                <label>Timeout (seconds)</label>
-                                <input type="number" class="form-control" id="timeout" value="1800" min="300" max="7200">
-                                <small class="help-block">Maximum processing time (default: 1800s = 30min)</small>
-                            </div>
                         </div>
                         <div class="modal-footer">
                             <button type="button" class="btn btn-default" data-dismiss="modal">Cancel</button>
-                            <button type="button" class="btn btn-primary" id="run-mriqc-btn">
+                            <button type="button" class="btn btn-primary" id="g-mriqc-run-btn">
                                 <i class="icon-ok"></i> Run MRIQC
                             </button>
                         </div>
@@ -129,20 +192,19 @@ const ItemViewExtension = {
                 </div>
             </div>
         `);
-        
-        dialog.find('#run-mriqc-btn').on('click', () => {
-            const participantLabel = dialog.find('#participant-label').val();
-            const modality = dialog.find('#modality').val();
-            const timeout = parseInt(dialog.find('#timeout').val());
 
-            dialog.modal('hide');
-            dialog.on('hidden.bs.modal', () => dialog.remove());
+        // Pre-select inferred modality
+        $dialog.find('#g-mriqc-modality').val(modality);
 
-            ItemViewExtension.executeMRIQC(itemView, itemId, participantLabel, modality, timeout);
+        $dialog.find('#g-mriqc-run-btn').on('click', () => {
+            const mod = $dialog.find('#g-mriqc-modality').val();
+            $dialog.modal('hide');
+            ItemViewExtension.executeMRIQC(itemView, itemId, participantLabel, mod, timeout);
         });
 
-        $('body').append(dialog);
-        dialog.modal('show');
+        $j('body').append($dialog);
+        $dialog.on('hidden.bs.modal', () => $dialog.remove());
+        $dialog.modal('show');
     },
     
     /**

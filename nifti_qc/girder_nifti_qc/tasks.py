@@ -116,12 +116,29 @@ def run_mriqc_task(task, **kwargs):
         file_info = gc.get(f"file/{file_id}")
         filename = file_info["name"]
 
-        # BIDS structure: sub-<label>/anat/sub-<label>_T1w.nii.gz
-        subject_dir = input_dir / f"sub-{participant_label}" / "anat"
-        subject_dir.mkdir(parents=True)
+        # BIDS requires dataset_description.json in the root
+        dataset_description = {
+            "Name": "Girder NIfTI QC",
+            "BIDSVersion": "1.6.0",
+            "DatasetType": "raw",
+        }
+        with open(input_dir / "dataset_description.json", "w") as f:
+            json.dump(dataset_description, f)
 
-        # Determine modality from filename or metadata
-        bids_filename = f"sub-{participant_label}_{modality}.nii.gz"
+        # BIDS structure varies by modality
+        if modality == "bold":
+            subdir = "func"
+            bids_filename = f"sub-{participant_label}_task-rest_{modality}.nii.gz"
+        elif modality == "dwi":
+            subdir = "dwi"
+            bids_filename = f"sub-{participant_label}_{modality}.nii.gz"
+        else:
+            # T1w, T2w and other anatomical modalities
+            subdir = "anat"
+            bids_filename = f"sub-{participant_label}_{modality}.nii.gz"
+
+        subject_dir = input_dir / f"sub-{participant_label}" / subdir
+        subject_dir.mkdir(parents=True)
         nifti_path = subject_dir / bids_filename
 
         gc.downloadFile(file_id, str(nifti_path))

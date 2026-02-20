@@ -129,6 +129,8 @@ class NiftiQC(Resource):
                     "girder_client_token": str(token["_id"]),
                     "girder_api_url": getApiUrl(),
                 },
+                # Route to dedicated MRIQC worker container (nipreps/mriqc)
+                queue="mriqc",
                 # Job title as girder_worker option
                 girder_job_title=f"MRIQC: {file_name} ({modality}, sub-{participantLabel})",
             )

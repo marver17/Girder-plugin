@@ -97,6 +97,29 @@ services:
       retries: 5
       start_period: 60s
 
+  # MRIQC dedicated Celery worker
+  # Built on nipreps/mriqc:latest — includes ANTs, FreeSurfer SynthStrip, FSL
+  # Consumes jobs from the 'mriqc' queue only
+  mriqc-worker:
+    build:
+      context: .
+      dockerfile: mriqc-worker/Dockerfile
+    container_name: girder-mriqc-worker
+    networks:
+      - girder-dev-net
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      mongodb:
+        condition: service_healthy
+    environment:
+      - CELERY_BROKER_URL=amqp://girder:girder@rabbitmq:5672//
+      - CELERY_RESULT_BACKEND=mongodb://mongodb:27017/girder
+      - PYTHONUNBUFFERED=1
+    volumes:
+      - ./nifti_qc:/opt/nifti_qc  # live-edit tasks.py without rebuild
+    restart: unless-stopped
+
 networks:
   girder-dev-net:
     driver: bridge

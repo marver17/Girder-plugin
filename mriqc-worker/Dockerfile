@@ -14,7 +14,7 @@ RUN pip install --no-cache-dir setuptools setuptools_scm wheel
 
 # Install only the packages needed by the Celery worker (no web server)
 RUN pip install --no-cache-dir -e /opt/girder/clients/python
-RUN pip install --no-cache-dir -e /opt/girder/girder_worker
+RUN pip install --no-cache-dir -e /opt/girder/worker
 RUN pip install --no-cache-dir -e /opt/girder/plugins/worker
 
 # nifti_qc plugin is mounted as a volume at /opt/nifti_qc (see docker-compose.yml)

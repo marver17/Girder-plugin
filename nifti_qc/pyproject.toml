@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=61.0", "setuptools_scm>=6.2"]
+requires = ["setuptools>=61.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -42,4 +42,4 @@ dev = [
 nifti_qc = "girder_nifti_qc:NiftiQCPlugin"
 
 [project.entry-points."girder_worker_plugins"]
-nifti_qc_tasks = "girder_nifti_qc.tasks:load_worker_plugin"
+nifti_qc_tasks = "girder_nifti_qc.worker_entry:load_worker_plugin"

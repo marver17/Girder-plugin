@@ -2,6 +2,8 @@
 REST API endpoints for NIfTI Quality Control
 """
 
+import os
+
 from girder.api import access
 from girder.api.describe import Description, autoDescribeRoute
 from girder.api.rest import Resource, filtermodel, getApiUrl
@@ -10,6 +12,19 @@ from girder.exceptions import RestException
 from girder.models.file import File
 from girder.models.item import Item
 from girder.models.token import Token
+from girder_jobs.constants import JobStatus
+from girder_jobs.models.job import Job
+
+
+def _worker_callback_url() -> str:
+    """Return the Girder API URL that Celery workers can actually reach.
+
+    When running in Docker, Girder's own getApiUrl() returns
+    http://localhost:8080/api/v1 which is unreachable from other containers.
+    Set GIRDER_WORKER_CALLBACK_URL=http://girder:8080/api/v1 on the Girder
+    server container to override it for worker callbacks.
+    """
+    return os.environ.get("GIRDER_WORKER_CALLBACK_URL") or getApiUrl()
 
 
 class NiftiQC(Resource):
@@ -107,16 +122,51 @@ class NiftiQC(Resource):
         print(f"DEBUG REST runMRIQC: api_url={getApiUrl()}")
         print(f"DEBUG REST runMRIQC: About to call apply_async")
 
-        # Mark item as processing
+        job_title = f"MRIQC: {file_name} ({modality}, sub-{participantLabel})"
+
+        # Crea il record Job su Girder PRIMA di inviare il task a Celery.
+        # Così il job appare subito in UI con stato QUEUED e il worker
+        # può agganciarsi ad esso tramite job_manager.
+        job = Job().createJob(
+            title=job_title,
+            type="mriqc",
+            user=self.getCurrentUser(),
+            handler="worker_handler",
+        )
+        # Job token: scope limitato all'aggiornamento di questo singolo job
+        job_token = Job().createJobToken(job)
+        # jobInfoSpec è il formato atteso da girder_worker.utils._job_manager().
+        # Deve corrispondere esattamente ai parametri del costruttore JobManager:
+        #   logPrint, url, method, headers, reference
+        # Passarlo direttamente nell'header fa sì che girder_before_task_publish
+        # lo trovi già presente e salti create_task_job() (che creerebbe un
+        # secondo job duplicato e userebbe URL irraggiungibili dall'host).
+        job_info_spec = {
+            "method": "PUT",
+            "url": "/".join((_worker_callback_url(), "job", str(job["_id"]))),
+            "reference": str(job["_id"]),
+            "headers": {"Girder-Token": str(job_token["_id"])},
+            "logPrint": True,
+        }
+        # Usa updateJob invece di scheduleJob: scheduleJob emette
+        # l'evento jobs.schedule che girder_plugin_worker intercetta
+        # e invia un secondo task legacy girder_worker.run — duplicato.
+        Job().updateJob(job, status=JobStatus.QUEUED)
+
+        # Segna l'item come in elaborazione
         Item().setMetadata(
             item,
             {
                 "nifti_qc_status": "processing",
+                "nifti_qc_job_id": str(job["_id"]),
                 "nifti_qc_started": str(self.getCurrentUser()["_id"]),
             },
         )
 
-        # Launch Celery task - pass all parameters including token
+        # Lancia il task Celery — jobInfoSpec passato come header Celery
+        # (NON jobInfo) così girder_before_task_publish trova già jobInfoSpec,
+        # salta create_task_job() ed il worker inizializza correttamente
+        # task.job_manager senza creare job duplicati o incontrare URL localhost.
         try:
             celery_job = run_mriqc_task.apply_async(
                 kwargs={
@@ -126,22 +176,26 @@ class NiftiQC(Resource):
                     "modality": modality,
                     "timeout": timeout,
                     "file_name": file_name,
-                    "girder_client_token": str(token["_id"]),
-                    "girder_api_url": getApiUrl(),
                 },
-                # Route to dedicated MRIQC worker container (nipreps/mriqc)
+                headers={
+                    "girder_client_token": str(token["_id"]),
+                    "girder_api_url": _worker_callback_url(),
+                    "jobInfoSpec": job_info_spec,
+                },
                 queue="mriqc",
-                # Job title as girder_worker option
-                girder_job_title=f"MRIQC: {file_name} ({modality}, sub-{participantLabel})",
             )
-            print(f"DEBUG REST runMRIQC: apply_async success, celery_id={celery_job.id}")
+            print(
+                f"DEBUG REST runMRIQC: apply_async success, celery_id={celery_job.id}, job_id={str(job['_id'])}"
+            )
         except Exception as e:
             print(f"DEBUG REST runMRIQC: apply_async FAILED: {e}")
             import traceback
+
             print(traceback.format_exc())
             raise RestException(f"Failed to submit MRIQC job: {e}", code=500)
 
         return {
+            "job_id": str(job["_id"]),
             "celery_id": celery_job.id,
             "item_id": str(item["_id"]),
             "file_id": fileId,
@@ -199,20 +253,41 @@ class NiftiQC(Resource):
         print(f"DEBUG REST: api_url={getApiUrl()}")
         print(f"DEBUG REST: About to call apply_async with kwargs and options")
 
-        # Launch Celery task - pass all parameters including token
+        # Crea il record Job su Girder PRIMA di inviare il task a Celery
+        job = Job().createJob(
+            title=f"Quick NIfTI Check: {file_name}",
+            type="nifti_quick_check",
+            user=self.getCurrentUser(),
+            handler="worker_handler",
+        )
+        job_token = Job().createJobToken(job)
+        job_info_spec = {
+            "method": "PUT",
+            "url": "/".join((_worker_callback_url(), "job", str(job["_id"]))),
+            "reference": str(job["_id"]),
+            "headers": {"Girder-Token": str(job_token["_id"])},
+            "logPrint": True,
+        }
+        # Usa updateJob invece di scheduleJob (evita dispatch duplicato)
+        Job().updateJob(job, status=JobStatus.QUEUED)
+
+        # Lancia il task — jobInfoSpec come header Celery (non jobInfo).
+        # Nessuna queue specifica: va alla coda 'celery' gestita dal worker dev.
         celery_job = quick_nifti_check.apply_async(
             kwargs={
                 "item_id": str(item["_id"]),
                 "file_id": fileId,
                 "file_name": file_name,
-                "girder_client_token": str(token["_id"]),
-                "girder_api_url": getApiUrl(),
             },
-            # Job title as girder_worker option
-            girder_job_title=f"Quick NIfTI Check: {file_name}",
+            headers={
+                "girder_client_token": str(token["_id"]),
+                "girder_api_url": _worker_callback_url(),
+                "jobInfoSpec": job_info_spec,
+            },
         )
 
         return {
+            "job_id": str(job["_id"]),
             "celery_id": celery_job.id,
             "item_id": str(item["_id"]),
             "status": "queued",

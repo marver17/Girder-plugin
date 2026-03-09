@@ -4,12 +4,15 @@
   "service": "girder",
   "workspaceFolder": "/workspace",
 
+  // Servizi da avviare insieme al dev container
+  "runServices": ["mongodb", "redis", "rabbitmq"],
+
   // Configurazione per eseguire come utente non-root
   "remoteUser": "girder",
   "containerUser": "girder",
 
   // Porte da esporre
-  "forwardPorts": [8080, 27017, 6379],
+  "forwardPorts": [8080, 27017, 6379, 5672, 15672],
   "portsAttributes": {
     "8080": {
       "label": "Girder Server",
@@ -21,6 +24,14 @@
     },
     "6379": {
       "label": "Redis",
+      "onAutoForward": "silent"
+    },
+    "5672": {
+      "label": "RabbitMQ AMQP",
+      "onAutoForward": "silent"
+    },
+    "15672": {
+      "label": "RabbitMQ Management",
       "onAutoForward": "silent"
     }
   },
@@ -56,7 +67,7 @@
   },
 
   // Comando da eseguire dopo la creazione del container
-  "postCreateCommand": "echo 'Dev container ready!\n\nServizi disponibili:\n- MongoDB: mongodb://mongodb:27017/girder\n- Redis: redis://redis:6379\n\nPer avviare Girder:\ngirder serve --host 0.0.0.0 --database mongodb://mongodb:27017/girder\n\nOppure usa: /usr/local/bin/start-girder.sh'",
+  "postCreateCommand": "sudo chown -R girder:girder /girder/plugins/ && for wc_dir in /girder/plugins/jobs/girder_jobs/web_client /girder/plugins/worker/girder_plugin_worker/web_client; do if [ -f \"$wc_dir/package.json\" ] && [ ! -d \"$wc_dir/dist\" ]; then echo \"Build web client: $wc_dir\" && cd \"$wc_dir\" && npm install && npm run build; fi; done && echo 'Dev container ready!\\n\\nServizi disponibili:\\n- MongoDB: mongodb://mongodb:27017/girder\\n- Redis: redis://redis:6379\\n\\nPer avviare Girder:\\ngirder serve --host 0.0.0.0 --database mongodb://mongodb:27017/girder\\n\\nOppure usa: /usr/local/bin/start-girder.sh'",
 
   // Feature aggiuntive
   "features": {
@@ -72,6 +83,11 @@
   "remoteEnv": {
     "PYTHONUNBUFFERED": "1",
     "GIRDER_MONGO_URI": "mongodb://mongodb:27017/girder",
-    "GIRDER_REDIS_URL": "redis://redis:6379"
+    "GIRDER_REDIS_URL": "redis://redis:6379",
+    "GIRDER_NOTIFICATION_REDIS_URL": "redis://redis:6379",
+    "BROKER_URL": "amqp://girder:girder@rabbitmq:5672//",
+    "CELERY_BROKER_URL": "amqp://girder:girder@rabbitmq:5672//",
+    "CELERY_RESULT_BACKEND": "mongodb://mongodb:27017/girder",
+    "GIRDER_WORKER_CALLBACK_URL": "http://girder:8080/api/v1"
   }
 }

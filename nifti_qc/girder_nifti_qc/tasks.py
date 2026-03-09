@@ -17,33 +17,8 @@ from girder_worker.app import app
 from girder_worker.utils import girder_job
 
 
-class NiftiQCWorkerPlugin:
-    """Plugin adapter for Girder Worker"""
-
-    def __init__(self, girder_worker_app):
-        self.app = girder_worker_app
-
-    def task_imports(self):
-        """Return list of task modules to import"""
-        return ["girder_nifti_qc.tasks"]
-
-
-def load_worker_plugin(celery_app):
-    """
-    Entry point for Girder Worker plugin discovery.
-    This function is called by stevedore to load the plugin.
-
-    Args:
-        celery_app: The Celery app instance
-
-    Returns:
-        NiftiQCWorkerPlugin: Plugin instance
-    """
-    return NiftiQCWorkerPlugin(celery_app)
-
-
-@app.task(bind=True)
 @girder_job(title="MRIQC - NIfTI Quality Control")
+@app.task(bind=True)
 def run_mriqc_task(task, **kwargs):
     """
     Execute MRIQC quality control on a NIfTI file using local installation
@@ -82,6 +57,13 @@ def run_mriqc_task(task, **kwargs):
     girder_api_url = getattr(
         task.request, "girder_api_url", "http://localhost:8080/api/v1"
     )
+    # When running inside Docker, the Girder server may send its own localhost URL
+    # which is unreachable from other containers. Override with the env var if set.
+    girder_api_url_env = os.environ.get("GIRDER_API_URL")
+    if girder_api_url_env and (
+        "localhost" in girder_api_url or "127.0.0.1" in girder_api_url
+    ):
+        girder_api_url = girder_api_url_env
 
     # Initialize progress with descriptive message
     # The @girder_job decorator handles job status updates automatically
@@ -212,7 +194,9 @@ def run_mriqc_task(task, **kwargs):
                 json={
                     "nifti_qc_results": {
                         "metrics": qc_results["metrics"],
-                        "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                        "timestamp": datetime.datetime.now(
+                            datetime.timezone.utc
+                        ).isoformat(),
                         "mriqc_version": _get_mriqc_version(),
                         "participant_label": participant_label,
                         "modality": modality,
@@ -252,8 +236,8 @@ def run_mriqc_task(task, **kwargs):
             raise
 
 
-@app.task(bind=True)
 @girder_job(title="Quick NIfTI Check")
+@app.task(bind=True)
 def quick_nifti_check(task, **kwargs):
     """
     Simple task to verify NIfTI structure without running full MRIQC
@@ -283,7 +267,14 @@ def quick_nifti_check(task, **kwargs):
     file_id = kwargs.get("file_id")
     file_name = kwargs.get("file_name", "unknown file")
     girder_client_token = getattr(task.request, "girder_client_token", None)
-    girder_api_url = getattr(task.request, "girder_api_url", "http://localhost:8080/api/v1")
+    girder_api_url = getattr(
+        task.request, "girder_api_url", "http://localhost:8080/api/v1"
+    )
+    girder_api_url_env = os.environ.get("GIRDER_API_URL")
+    if girder_api_url_env and (
+        "localhost" in girder_api_url or "127.0.0.1" in girder_api_url
+    ):
+        girder_api_url = girder_api_url_env
 
     print(f"[quick_nifti_check] Starting: item={item_id}, file={file_name}")
 
@@ -340,6 +331,7 @@ def quick_nifti_check(task, **kwargs):
 
     except Exception as e:
         import traceback
+
         print(f"[quick_nifti_check] ERROR: {e}")
         print(traceback.format_exc())
         safe_progress(f"Quick check failed: {e}", current=100)
@@ -426,7 +418,9 @@ def _update_item_error(gc, item_id, error_msg):
                 "nifti_qc_status": "error",
                 "nifti_qc_error": {
                     "message": error_msg,
-                    "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                    "timestamp": datetime.datetime.now(
+                        datetime.timezone.utc
+                    ).isoformat(),
                 },
             },
         )

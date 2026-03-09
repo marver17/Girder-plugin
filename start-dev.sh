@@ -19,7 +19,9 @@ case "${1:-all}" in
     ;;
   worker)
     echo "=== Avvio Celery worker ==="
-    exec celery -A girder_worker.app worker -l info --pool=solo
+    # Ascolta solo la coda 'celery' (default).
+    # La coda 'mriqc' è riservata al container dedicato mriqc-worker (nipreps/mriqc).
+    exec celery -A girder_worker.app worker -l info --pool=solo --queues=celery
     ;;
   all)
     echo "=== Avvio Girder server in background ==="
@@ -27,7 +29,8 @@ case "${1:-all}" in
     GIRDER_PID=$!
 
     echo "=== Avvio Celery worker in background ==="
-    celery -A girder_worker.app worker -l info --pool=solo &
+    # Ascolta solo la coda 'celery'. La coda 'mriqc' è del container mriqc-worker.
+    celery -A girder_worker.app worker -l info --pool=solo --queues=celery &
     WORKER_PID=$!
 
     echo ""

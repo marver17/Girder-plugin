@@ -79,6 +79,9 @@ services:
       - CELERY_BROKER_URL=amqp://girder:girder@rabbitmq:5672//
       - CELERY_RESULT_BACKEND=mongodb://mongodb:27017/girder
       - PYTHONUNBUFFERED=1
+      # URL usato dal server Girder quando costruisce i messaggi Celery per i worker.
+      # Deve essere raggiungibile dagli altri container (usa hostname Docker, non localhost).
+      - GIRDER_WORKER_CALLBACK_URL=http://girder:8080/api/v1
     volumes:
       - .:/workspace
       - ./oauth2:/girder/oauth2
@@ -116,8 +119,15 @@ services:
       - CELERY_BROKER_URL=amqp://girder:girder@rabbitmq:5672//
       - CELERY_RESULT_BACKEND=mongodb://mongodb:27017/girder
       - PYTHONUNBUFFERED=1
+      # Worker runs as root (nipreps/mriqc base image). Safe in dev because
+      # RabbitMQ is on an internal Docker network and messages use JSON, not pickle.
+      - C_FORCE_ROOT=1
+      # Girder API URL reachable from within the Docker network.
+      # The Girder server dispatches jobs with its own localhost URL which is
+      # unreachable from other containers — this env var overrides it.
+      - GIRDER_API_URL=http://girder:8080/api/v1
     volumes:
-      - ./nifti_qc:/opt/nifti_qc  # live-edit tasks.py without rebuild
+      - ./nifti_qc:/opt/nifti_qc # live-edit tasks.py without rebuild
     restart: unless-stopped
 
 networks:

@@ -260,6 +260,17 @@ const ItemViewExtension = {
         let pollCount = 0;
         const maxPolls = 120; // 30 minutes with 15s intervals
 
+        // Ripristina entrambi i bottoni al loro stato iniziale
+        const resetButtons = () => {
+            itemView.$('.g-nifti-qc-quick')
+                .prop('disabled', false)
+                .html('<i class="icon-flash"></i> Quick Check');
+            itemView.$('.g-nifti-qc-mriqc')
+                .prop('disabled', false)
+                .html('<i class="icon-chart-bar"></i> Run MRIQC Quality Control');
+            itemView.$('.g-qc-processing-badge').remove();
+        };
+
         const checkResults = () => {
             pollCount++;
 
@@ -274,6 +285,7 @@ const ItemViewExtension = {
                 console.log('[QC Poll] status:', status, '| nifti_qc_results:', qcResults, '| raw meta:', item.meta);
 
                 if (status === 'completed' || status === 'quick_check_completed') {
+                    resetButtons();
                     // Update model with new fields (triggers Backbone change events)
                     // This triggers listenTo in NiftiView which calls _renderExtensionWidgets()
                     itemView.model.set({
@@ -288,6 +300,7 @@ const ItemViewExtension = {
                         timeout: 4000
                     });
                 } else if (status === 'error') {
+                    resetButtons();
                     events.trigger('g:alert', {
                         icon: 'cancel',
                         text: 'QC processing failed. Check item metadata for details.',
@@ -297,6 +310,15 @@ const ItemViewExtension = {
                 } else if (pollCount < maxPolls) {
                     // Continue polling: status is 'processing', undefined, or unknown
                     setTimeout(checkResults, interval);
+                } else {
+                    // Timeout: max polls reached
+                    resetButtons();
+                    events.trigger('g:alert', {
+                        icon: 'attention',
+                        text: 'QC polling timeout. The job may still be running — check the Jobs panel.',
+                        type: 'warning',
+                        timeout: 8000
+                    });
                 }
             });
         };

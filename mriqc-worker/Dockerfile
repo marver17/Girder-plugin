@@ -23,8 +23,12 @@ RUN pip install --no-cache-dir -e /opt/girder/plugins/worker
 
 WORKDIR /opt
 
+# Override the base image entrypoint (nipreps/mriqc sets ENTRYPOINT ["mriqc"])
+# Without this, CMD args would be passed to mriqc instead of running as a shell command.
+ENTRYPOINT []
+
 CMD ["sh", "-c", \
-     "pip install --no-cache-dir -e /opt/nifti_qc && \
+     "pip install --no-cache-dir --no-build-isolation -e /opt/nifti_qc && \
       celery -A girder_worker.app worker \
         --queues=mriqc \
         --loglevel=info \

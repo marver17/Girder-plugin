@@ -153,6 +153,41 @@ def run_mriqc_task(task, **kwargs):
 
         gc.downloadFile(file_id, str(nifti_path))
 
+        # Il file potrebbe essere un .nii non compresso anche se il path termina
+        # con .nii.gz (es. file con doppia estensione come .nii.nii o rinominati).
+        # Nibabel (e MRIQC) falliscono aprendo un .nii come gzip.
+        # Soluzione: se i magic bytes non corrispondono a gzip, comprimiamo i byte
+        # raw con il modulo gzip della stdlib — nessuna dipendenza da nibabel qui.
+        import gzip as _gzip
+
+        import nibabel as nib
+
+        with open(nifti_path, "rb") as _f:
+            _magic = _f.read(2)
+        if _magic != b"\x1f\x8b":
+            print(
+                f"[run_mriqc_task] File non gzippato ({_magic!r}), comprimo in-place: {nifti_path.name}"
+            )
+            _raw_bytes = nifti_path.read_bytes()
+            with _gzip.open(nifti_path, "wb") as _gz_out:
+                _gz_out.write(_raw_bytes)
+            del _raw_bytes
+            print(f"[run_mriqc_task] Compresso ok → {nifti_path.name}")
+
+        # Verifica che il volume sia 3D: MRIQC fallisce su acquisizioni 2D
+        # (es. acq-2D-TRA) perché il passo N4 di ANTs produce un volume vuoto.
+        _img = nib.load(str(nifti_path))
+        _shape = _img.shape[:3]
+        _min_slices = 10  # soglia: meno di 10 slice = acquisizione 2D/thin slab
+        if _shape[2] < _min_slices:
+            _msg = (
+                f"Acquisizione 2D non supportata da MRIQC: shape={_shape}, "
+                f"solo {_shape[2]} slice (minimo {_min_slices}). "
+                "MRIQC richiede volumi 3D. Usa 'Quick Check' per validare la struttura del file."
+            )
+            _update_item_error(gc, item_id, _msg)
+            raise Exception(_msg)
+
         safe_progress(message=f"Running MRIQC on {filename}...", current=30)
 
         # Prepare MRIQC command (local installation)
@@ -459,4 +494,5 @@ def _update_item_error(gc, item_id, error_msg):
             },
         )
     except Exception:
+        pass
         pass

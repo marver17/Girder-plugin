@@ -21,10 +21,18 @@ def _worker_callback_url() -> str:
 
     When running in Docker, Girder's own getApiUrl() returns
     http://localhost:8080/api/v1 which is unreachable from other containers.
-    Set GIRDER_WORKER_CALLBACK_URL=http://girder:8080/api/v1 on the Girder
-    server container to override it for worker callbacks.
+    Priority:
+      1. GIRDER_WORKER_CALLBACK_URL env var (explicit override)
+      2. getApiUrl() with localhost/127.0.0.1 replaced by the Docker service
+         hostname 'girder' so workers on the same bridge network can reach it.
     """
-    return os.environ.get("GIRDER_WORKER_CALLBACK_URL") or getApiUrl()
+    url = os.environ.get("GIRDER_WORKER_CALLBACK_URL") or getApiUrl()
+    # If the URL still points to localhost (env var missing or Girder not
+    # restarted after docker-compose change), rewrite it to the Docker service
+    # hostname so the mriqc-worker container can call back on the bridge network.
+    if "localhost" in url or "127.0.0.1" in url:
+        url = url.replace("127.0.0.1", "girder").replace("localhost", "girder")
+    return url
 
 
 class NiftiQC(Resource):
@@ -176,6 +184,11 @@ class NiftiQC(Resource):
                     "modality": modality,
                     "timeout": timeout,
                     "file_name": file_name,
+                    # Passati esplicitamente perché il task aggiorna lo stato
+                    # del job via REST (non tramite job_manager che potrebbe
+                    # essere None se task_prerun non si aggancia).
+                    "job_id": str(job["_id"]),
+                    "job_token_id": str(job_token["_id"]),
                 },
                 headers={
                     "girder_client_token": str(token["_id"]),
@@ -272,18 +285,21 @@ class NiftiQC(Resource):
         Job().updateJob(job, status=JobStatus.QUEUED)
 
         # Lancia il task — jobInfoSpec come header Celery (non jobInfo).
-        # Nessuna queue specifica: va alla coda 'celery' gestita dal worker dev.
+        # Usa la coda 'mriqc': è l'unico worker Celery attivo nel docker-compose.
         celery_job = quick_nifti_check.apply_async(
             kwargs={
                 "item_id": str(item["_id"]),
                 "file_id": fileId,
                 "file_name": file_name,
+                "job_id": str(job["_id"]),
+                "job_token_id": str(job_token["_id"]),
             },
             headers={
                 "girder_client_token": str(token["_id"]),
                 "girder_api_url": _worker_callback_url(),
                 "jobInfoSpec": job_info_spec,
             },
+            queue="mriqc",
         )
 
         return {

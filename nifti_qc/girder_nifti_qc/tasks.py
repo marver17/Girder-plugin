@@ -51,6 +51,8 @@ def run_mriqc_task(task, **kwargs):
     file_name = kwargs.get("file_name", "unknown file")
     participant_label = kwargs.get("participant_label", "001")
     modality = kwargs.get("modality", "T1w")
+    job_id = kwargs.get("job_id")
+    job_token_id = kwargs.get("job_token_id")
 
     # Extract reserved parameters from task.request (girder_worker moves them there)
     girder_client_token = getattr(task.request, "girder_client_token", None)
@@ -65,17 +67,45 @@ def run_mriqc_task(task, **kwargs):
     ):
         girder_api_url = girder_api_url_env
 
+    # Crea il client Girder subito (serve sia per aggiornare lo stato del job
+    # che per scaricare i file in seguito).
+    gc = GirderClient(apiUrl=girder_api_url)
+    gc.token = girder_client_token
+
+    # Transizione QUEUED → RUNNING esplicita.
+    # Il segnale task_prerun di girder_worker dovrebbe farlo automaticamente,
+    # ma in alcune configurazioni non si aggancia correttamente: il job
+    # resterebbe bloccato in QUEUED anche mentre il task è in esecuzione.
+    if job_id and job_token_id:
+        try:
+            job_gc = GirderClient(apiUrl=girder_api_url)
+            job_gc.token = job_token_id
+            # parameters= invia come query string: formato garantito da Girder REST
+            job_gc.put(f"job/{job_id}", parameters={"status": 2})  # 2 = RUNNING
+            print(f"[run_mriqc_task] Job {job_id} → RUNNING")
+        except Exception as _e:
+            print(f"[run_mriqc_task] WARNING: impossibile impostare RUNNING: {_e}")
+
+    # Wrapper sicuro per updateProgress: evita crash se job_manager è None
+    # (accade quando il segnale task_prerun di girder_worker non si aggancia).
+    def safe_progress(message, current=None, total=None):
+        print(f"[run_mriqc_task] {message}")
+        try:
+            kw = {"message": message}
+            if current is not None:
+                kw["current"] = current
+            if total is not None:
+                kw["total"] = total
+            task.job_manager.updateProgress(**kw)
+        except Exception as _e:
+            print(f"[run_mriqc_task] updateProgress non-fatal: {_e}")
+
     # Initialize progress with descriptive message
-    # The @girder_job decorator handles job status updates automatically
-    task.job_manager.updateProgress(
+    safe_progress(
         message=f"MRIQC: {file_name} ({modality}, sub-{participant_label})",
         total=100,
         current=5,
     )
-
-    # Create Girder client manually with token
-    gc = GirderClient(apiUrl=girder_api_url)
-    gc.token = girder_client_token
 
     # Create temporary workspace
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -91,9 +121,7 @@ def run_mriqc_task(task, **kwargs):
         work_dir.mkdir()
 
         # Download NIfTI file
-        task.job_manager.updateProgress(
-            message="Downloading NIfTI file from Girder...", current=10
-        )
+        safe_progress(message="Downloading NIfTI file from Girder...", current=10)
 
         file_info = gc.get(f"file/{file_id}")
         filename = file_info["name"]
@@ -125,9 +153,7 @@ def run_mriqc_task(task, **kwargs):
 
         gc.downloadFile(file_id, str(nifti_path))
 
-        task.job_manager.updateProgress(
-            message=f"Running MRIQC on {filename}...", current=30
-        )
+        safe_progress(message=f"Running MRIQC on {filename}...", current=30)
 
         # Prepare MRIQC command (local installation)
         mriqc_cmd = [
@@ -149,7 +175,7 @@ def run_mriqc_task(task, **kwargs):
 
         try:
             # Execute MRIQC
-            task.job_manager.updateProgress(
+            safe_progress(
                 message="MRIQC processing in progress (this may take several minutes)...",
                 current=40,
             )
@@ -166,17 +192,13 @@ def run_mriqc_task(task, **kwargs):
                     f"MRIQC failed with code {result.returncode}: {result.stderr}"
                 )
 
-            task.job_manager.updateProgress(
-                message="MRIQC completed, collecting results...", current=80
-            )
+            safe_progress(message="MRIQC completed, collecting results...", current=80)
 
             # Parse MRIQC outputs
             qc_results = _parse_mriqc_outputs(output_dir, participant_label, modality)
 
             # Upload results to Girder
-            task.job_manager.updateProgress(
-                message="Uploading results to Girder...", current=90
-            )
+            safe_progress(message="Uploading results to Girder...", current=90)
 
             _upload_results_to_girder(
                 gc,
@@ -207,7 +229,7 @@ def run_mriqc_task(task, **kwargs):
                 },
             )
 
-            task.job_manager.updateProgress(
+            safe_progress(
                 message="Quality control completed successfully!", current=100
             )
 
@@ -266,6 +288,8 @@ def quick_nifti_check(task, **kwargs):
     item_id = kwargs.get("item_id")
     file_id = kwargs.get("file_id")
     file_name = kwargs.get("file_name", "unknown file")
+    job_id = kwargs.get("job_id")
+    job_token_id = kwargs.get("job_token_id")
     girder_client_token = getattr(task.request, "girder_client_token", None)
     girder_api_url = getattr(
         task.request, "girder_api_url", "http://localhost:8080/api/v1"
@@ -280,6 +304,16 @@ def quick_nifti_check(task, **kwargs):
 
     gc = GirderClient(apiUrl=girder_api_url)
     gc.token = girder_client_token
+
+    # Transizione QUEUED → RUNNING esplicita (stessa logica di run_mriqc_task).
+    if job_id and job_token_id:
+        try:
+            job_gc = GirderClient(apiUrl=girder_api_url)
+            job_gc.token = job_token_id
+            job_gc.put(f"job/{job_id}", parameters={"status": 2})  # 2 = RUNNING
+            print(f"[quick_nifti_check] Job {job_id} → RUNNING")
+        except Exception as _e:
+            print(f"[quick_nifti_check] WARNING: impossibile impostare RUNNING: {_e}")
 
     try:
         safe_progress(f"Quick check: {file_name}", total=100, current=5)

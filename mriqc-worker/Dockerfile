@@ -28,7 +28,7 @@ WORKDIR /opt
 ENTRYPOINT []
 
 CMD ["sh", "-c", \
-     "pip install --no-cache-dir --no-build-isolation -e /opt/nifti_qc && \
+     "pip install --no-cache-dir --no-build-isolation --no-deps -e /opt/nifti_qc && \
       celery -A girder_worker.app worker \
         --queues=mriqc \
         --loglevel=info \

@@ -1,3 +1,6 @@
+##TODO sistemare problema di upload. Vedere se c'è la possibilità di farlo asincrono rispetto al task, magari con un task secondario dedicato all'upload, in modo da non bloccare il task principale durante l'upload di file potenzialmente grandi (es. log completi o file stat).
+
+
 """
 Task DIADEMA – FreeSurfer recon-all.
 

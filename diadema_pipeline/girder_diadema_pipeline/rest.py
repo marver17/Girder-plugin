@@ -70,10 +70,34 @@ class DiademaResource(Resource):
         # Parametri MRIQC
         .param("modality", "Modalità MRI (T1w, T2w, bold, dwi)", required=False, default="T1w")
         .param("timeout", "Timeout in secondi", required=False, dataType="integer", default=1800)
+        .param("outputBaseDir", "Directory output persistente per MRIQC "
+               "(default: $DIADEMA_MRIQC_OUTPUT_DIR o /data/diadema/mriqc)",
+               required=False, default="")
+        .param("keepWorkDir", "Conserva la work dir MRIQC dopo l'esecuzione",
+               required=False, dataType="boolean", default=False)
         # Parametri FreeSurfer
-        .param("directive", "Direttiva recon-all", required=False, default="-all")
-        .param("openmpThreads", "Thread OpenMP", required=False, dataType="integer", default=4)
-        .param("extraFlags", "Flag extra per recon-all", required=False, default="")
+        .param("directive", "Direttiva recon-all: -all | -autorecon1 | -autorecon2 | "
+               "-autorecon3 | -autorecon2-cp | -autorecon2-wm",
+               required=False, default="-all")
+        .param("hemi", "Emisfero: both | lh | rh", required=False, default="both")
+        .param("openmpThreads", "Thread OpenMP per recon-all (1-16)",
+               required=False, dataType="integer", default=4)
+        .param("mprage", "Usa protocollo MGH MP-RAGE (-mprage)",
+               required=False, dataType="boolean", default=False)
+        .param("wsatlas", "Skull stripping con atlas (-wsatlas)",
+               required=False, dataType="boolean", default=False)
+        .param("deface", "Defacing del volume (-deface)",
+               required=False, dataType="boolean", default=False)
+        .param("noIsrunning", "Salta check 'already running' (raccomandato in container)",
+               required=False, dataType="boolean", default=True)
+        .param("extraFlags", "Flag extra verbatim per recon-all", required=False, default="")
+        .param("subjectsDir", "Directory SUBJECTS_DIR FreeSurfer "
+               "(default: $DIADEMA_SUBJECTS_DIR o /data/diadema/subjects)",
+               required=False, default="")
+        .param("keepSubjectsDir", "Conserva la cartella soggetto dopo l'esecuzione",
+               required=False, dataType="boolean", default=True)
+        .param("fsTimeout", "Timeout FreeSurfer in secondi (default 14400 = 4h)",
+               required=False, dataType="integer", default=14400)
         # Parametri LST-AI
         .param("inputType", "Tipo input (T1+FLAIR, T1 only)", required=False, default="T1+FLAIR")
         .param("threshold", "Soglia lesioni (0.0-1.0)", required=False, dataType="float", default=0.5)
@@ -82,7 +106,10 @@ class DiademaResource(Resource):
         .errorResponse("Item non trovato", 404)
     )
     def runTool(self, item, toolId, fileId, participantLabel, modality, timeout,
-                directive, openmpThreads, extraFlags, inputType, threshold, useGpu, params):
+                outputBaseDir, keepWorkDir,
+                directive, hemi, openmpThreads, mprage, wsatlas, deface,
+                noIsrunning, extraFlags, subjectsDir, keepSubjectsDir, fsTimeout,
+                inputType, threshold, useGpu, params):
         if toolId not in _TOOL_CONFIG:
             raise RestException(f"Tool non supportato: '{toolId}'. Valori ammessi: {list(_TOOL_CONFIG)}", 400)
 
@@ -92,25 +119,35 @@ class DiademaResource(Resource):
         if toolId == "mriqc":
             from .tasks import run_mriqc_task as celery_task
             task_kwargs = dict(
-                participant_label=participantLabel,
-                modality=modality,
-                timeout=timeout,
+                participant_label = participantLabel,
+                modality          = modality,
+                timeout           = timeout,
+                output_base_dir   = outputBaseDir or None,
+                keep_work_dir     = keepWorkDir,
             )
         elif toolId == "freesurfer":
             from .tasks import run_freesurfer_task as celery_task
             task_kwargs = dict(
-                participant_label=participantLabel,
-                directive=directive,
-                openmp_threads=openmpThreads,
-                extra_flags=extraFlags,
+                participant_label = participantLabel,
+                directive         = directive,
+                hemi              = hemi,
+                openmp_threads    = openmpThreads,
+                mprage            = mprage,
+                wsatlas           = wsatlas,
+                deface            = deface,
+                no_isrunning      = noIsrunning,
+                extra_flags       = extraFlags,
+                subjects_dir      = subjectsDir or None,
+                keep_subjects_dir = keepSubjectsDir,
+                timeout           = fsTimeout,
             )
         else:  # lstai
             from .tasks import run_lstai_task as celery_task
             task_kwargs = dict(
-                participant_label=participantLabel,
-                input_type=inputType,
-                threshold=threshold,
-                use_gpu=useGpu,
+                participant_label = participantLabel,
+                input_type        = inputType,
+                threshold         = threshold,
+                use_gpu           = useGpu,
             )
 
         # Trova il file

@@ -1,6 +1,17 @@
 """
-Task Celery per DIADEMA Pipeline.
+ATTENZIONE: questo file è stato sostituito dal package tasks/
+
+  girder_diadema_pipeline/tasks/
+      __init__.py      ← re-export di tutti i task
+      _helpers.py      ← helper condivisi
+      mriqc.py         ← run_mriqc_task
+      freesurfer.py    ← run_freesurfer_task
+      lstai.py         ← run_lstai_task
+
+Python preferisce il package (tasks/) al modulo (tasks.py) con lo stesso nome,
+quindi questo file non viene mai importato. È mantenuto solo per la cronologia git.
 """
+
 
 import datetime
 import json
@@ -56,6 +67,11 @@ def _make_safe_progress(task, task_name):
     def safe_progress(message, current=None, total=None):
         print(f"[{task_name}] {message}")
         try:
+            # write() fa streaming in tempo reale nel log del job Girder
+            task.job_manager.write(f"{message}\n")
+        except Exception:
+            pass
+        try:
             kw = {"message": message}
             if current is not None:
                 kw["current"] = current
@@ -85,7 +101,7 @@ def _get_mriqc_version():
 # ── MRI QC (MRIQC) ────────────────────────────────────────────────────────────
 
 @girder_job(title="DIADEMA – MRI QC")
-@app.task(bind=True)
+@app.task(bind=True, acks_late=True, reject_on_worker_lost=True)
 def run_mriqc_task(task, **kwargs):
     """Esegue MRIQC su un file NIfTI e salva i risultati sull'item Girder."""
     import gzip as _gzip
@@ -172,81 +188,121 @@ def run_mriqc_task(task, **kwargs):
             "--participant-label", participant_label,
             "--no-sub", "-w", str(work_dir), "--verbose-reports",
         ]
-        mriqc_proc = subprocess.Popen(
-            mriqc_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            text=True, start_new_session=True,
-        )
-        _elapsed = 0
-        while mriqc_proc.poll() is None:
-            _time.sleep(10)
-            _elapsed += 10
-            if _elapsed >= timeout:
-                os.killpg(os.getpgid(mriqc_proc.pid), _signal.SIGTERM)
-                mriqc_proc.wait()
-                raise subprocess.TimeoutExpired(mriqc_cmd, timeout)
-            if job_id:
-                try:
-                    s = gc.get(f"job/{job_id}").get("status")
-                    if s in (5, 824):
+        try:
+            mriqc_proc = subprocess.Popen(
+                mriqc_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                text=True, start_new_session=True,
+            )
+
+            _elapsed = 0
+            while mriqc_proc.poll() is None:
+                _time.sleep(10)
+                _elapsed += 10
+
+                # Timeout esplicito
+                if _elapsed >= timeout:
+                    os.killpg(os.getpgid(mriqc_proc.pid), _signal.SIGTERM)
+                    mriqc_proc.wait()
+                    raise subprocess.TimeoutExpired(mriqc_cmd, timeout)
+
+                # Check cancellazione: il flag è FUORI dal try/except HTTP
+                # così raise Ignore() non viene inghiottito dall'except.
+                _cancel_requested = False
+                _cancel_status = None
+                if job_id:
+                    try:
+                        _job_state = gc.get(f"job/{job_id}")
+                        _cancel_status = _job_state.get("status")
+                        print(f"[{TASK_NAME}] poll job {job_id}: status={_cancel_status}")
+                        if _cancel_status in (5, 824):  # CANCELLED / CANCELING
+                            _cancel_requested = True
+                    except Exception as _poll_e:
+                        print(f"[{TASK_NAME}] poll status non-fatal: {_poll_e}")
+
+                # Kill ed Ignore() sono FUORI dal try/except HTTP
+                if _cancel_requested:
+                    print(f"[{TASK_NAME}] Job {job_id} in stato cancel ({_cancel_status}), termino MRIQC...")
+                    try:
                         os.killpg(os.getpgid(mriqc_proc.pid), _signal.SIGTERM)
                         mriqc_proc.wait(timeout=30)
-                        _update_item_fields(gc, item_id,
-                            diadema_mriqc_status="error",
-                            diadema_mriqc_error={"message": "Job cancellato",
-                                                 "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat()})
+                    except Exception as _kill_e:
+                        print(f"[{TASK_NAME}] killpg non-fatal: {_kill_e}")
                         try:
-                            gc.put(f"job/{job_id}", parameters={"status": 5})
+                            mriqc_proc.kill()
+                            mriqc_proc.wait(timeout=10)
                         except Exception:
                             pass
-                        from celery.exceptions import Ignore
-                        raise Ignore()
-                except Exception as pe:
-                    print(f"[{TASK_NAME}] poll non-fatal: {pe}")
+                    _update_item_fields(gc, item_id,
+                        diadema_mriqc_status="error",
+                        diadema_mriqc_error={"message": "Job cancellato dall'utente",
+                                             "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat()})
+                    try:
+                        gc.put(f"job/{job_id}", parameters={"status": 5})
+                        print(f"[{TASK_NAME}] Job {job_id} → CANCELLED")
+                    except Exception as _ce:
+                        print(f"[{TASK_NAME}] WARNING set CANCELLED: {_ce}")
+                    from celery.exceptions import Ignore
+                    raise Ignore()
 
-        _, stderr = mriqc_proc.communicate()
-        if mriqc_proc.returncode != 0:
-            raise Exception(f"MRIQC fallito (code {mriqc_proc.returncode}): {stderr[-2000:]}")
+            stdout, stderr = mriqc_proc.communicate()
+            if mriqc_proc.returncode != 0:
+                raise Exception(f"MRIQC fallito (code {mriqc_proc.returncode}): {stderr[-2000:]}")
 
-        safe_progress("MRIQC completato, raccolta risultati...", current=80)
+            safe_progress("MRIQC completato, raccolta risultati...", current=80)
 
-        # Parse output
-        metrics = {}
-        json_files = list(output_dir.glob(f"**/sub-{participant_label}_{modality}.json"))
-        if json_files:
-            with open(json_files[0]) as f:
-                metrics = json.load(f)
+            # Parse output
+            metrics = {}
+            json_files = list(output_dir.glob(f"**/sub-{participant_label}_{modality}.json"))
+            if json_files:
+                with open(json_files[0]) as f:
+                    metrics = json.load(f)
 
-        # Upload report
-        safe_progress("Upload risultati su Girder...", current=90)
-        uploaded = []
-        for html_file in output_dir.glob("**/*.html"):
-            gc.uploadFileToItem(item_id, str(html_file))
-            uploaded.append(html_file.name)
-        for jf in json_files:
-            gc.uploadFileToItem(item_id, str(jf))
-            uploaded.append(jf.name)
+            # Upload report
+            safe_progress("Upload risultati su Girder...", current=90)
+            uploaded = []
+            for html_file in output_dir.glob("**/*.html"):
+                gc.uploadFileToItem(item_id, str(html_file))
+                uploaded.append(html_file.name)
+            for jf in json_files:
+                gc.uploadFileToItem(item_id, str(jf))
+                uploaded.append(jf.name)
 
-        _update_item_fields(gc, item_id,
-            diadema_mriqc_results={
-                "metrics": metrics,
-                "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
-                "mriqc_version": _get_mriqc_version(),
-                "participant_label": participant_label,
-                "modality": modality,
-                "file_id": file_id,
-                "file_name": filename,
-                "reports_uploaded": uploaded,
-            },
-            diadema_mriqc_status="completed",
-        )
-        safe_progress("Quality control completato!", current=100)
-        return {"status": "success", "item_id": item_id, "metrics": metrics}
+            _update_item_fields(gc, item_id,
+                diadema_mriqc_results={
+                    "metrics": metrics,
+                    "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                    "mriqc_version": _get_mriqc_version(),
+                    "participant_label": participant_label,
+                    "modality": modality,
+                    "file_id": file_id,
+                    "file_name": filename,
+                    "reports_uploaded": uploaded,
+                },
+                diadema_mriqc_status="completed",
+            )
+            safe_progress("Quality control completato!", current=100)
+            return {"status": "success", "item_id": item_id, "metrics": metrics}
+
+        except subprocess.TimeoutExpired:
+            _update_item_fields(gc, item_id,
+                diadema_mriqc_status="error",
+                diadema_mriqc_error={"message": f"MRIQC timeout dopo {timeout}s",
+                                     "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat()})
+            raise Exception(f"MRIQC timeout dopo {timeout} secondi")
+
+        except Exception as _exc:
+            # salva l'errore sull'item e rilancia perché @girder_job gestisce il job failure
+            _update_item_fields(gc, item_id,
+                diadema_mriqc_status="error",
+                diadema_mriqc_error={"message": str(_exc),
+                                     "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat()})
+            raise
 
 
 # ── FreeSurfer recon-all ───────────────────────────────────────────────────────
 
 @girder_job(title="DIADEMA – FreeSurfer")
-@app.task(bind=True)
+@app.task(bind=True, acks_late=True, reject_on_worker_lost=True)
 def run_freesurfer_task(task, **kwargs):
     """Esegue FreeSurfer recon-all. TODO: implementazione completa."""
     TASK_NAME = "run_freesurfer_task"
@@ -261,7 +317,7 @@ def run_freesurfer_task(task, **kwargs):
 # ── LST-AI ────────────────────────────────────────────────────────────────────
 
 @girder_job(title="DIADEMA – LST-AI")
-@app.task(bind=True)
+@app.task(bind=True, acks_late=True, reject_on_worker_lost=True)
 def run_lstai_task(task, **kwargs):
     """Esegue LST-AI lesion segmentation. TODO: implementazione completa."""
     TASK_NAME = "run_lstai_task"

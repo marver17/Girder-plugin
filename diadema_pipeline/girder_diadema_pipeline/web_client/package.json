@@ -1,15 +1,15 @@
 {
-  "name": "@girder/plugin-template",
+  "name": "@girder/diadema-pipeline",
   "version": "0.1.0",
-  "description": "Plugin Template web client",
+  "description": "DIADEMA Pipeline web client – MRI QC, FreeSurfer, LST-AI",
   "type": "module",
   "files": ["dist", "package.json"],
-  "main": "./dist/plugin-template.umd.cjs",
-  "module": "./dist/plugin-template.js",
+  "main": "./dist/diadema-pipeline.umd.cjs",
+  "module": "./dist/diadema-pipeline.js",
   "exports": {
     ".": {
-      "import": "./dist/plugin-template.js",
-      "require": "./dist/plugin-template.umd.cjs"
+      "import": "./dist/diadema-pipeline.js",
+      "require": "./dist/diadema-pipeline.umd.cjs"
     },
     "./package.json": "./package.json"
   },
@@ -18,7 +18,7 @@
     "dev": "vite build --watch"
   },
   "girderPlugin": {
-    "name": "plugin_template",
+    "name": "diadema_pipeline",
     "main": "./main.js"
   },
   "dependencies": {

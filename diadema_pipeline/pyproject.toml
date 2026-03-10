@@ -1,30 +1,18 @@
-# ──────────────────────────────────────────────────────────────────────────────
-# TEMPLATE PLUGIN – pyproject.toml
-#
-# ISTRUZIONI:
-#   1. Sostituisci ogni occorrenza di "plugin_template" / "PluginTemplate"
-#      con il nome reale del tuo plugin.
-#   2. Aggiorna "name", "description", "authors", "keywords", "dependencies".
-#   3. L'entry point "girder.plugin" registra il plugin nel server Girder.
-#   4. L'entry point "girder_worker_plugins" registra i task Celery via
-#      stevedore. Rimuovilo se il plugin non ha task Celery.
-# ──────────────────────────────────────────────────────────────────────────────
-
 [build-system]
 requires = ["setuptools>=61.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "girder-plugin-template"
+name = "girder-diadema-pipeline"
 version = "0.1.0"
-description = "Template plugin for Girder – replace this description"
+description = "DIADEMA Pipeline – MRI QC, FreeSurfer, LST-AI via Girder Worker"
 readme = "README.md"
 requires-python = ">=3.10"
 license = {text = "Apache-2.0"}
 authors = [
     {name = "Your Name", email = "you@example.com"}
 ]
-keywords = ["girder", "plugin", "template"]
+keywords = ["girder", "neuroimaging", "mriqc", "freesurfer", "lst-ai", "pipeline"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Environment :: Web Environment",
@@ -36,12 +24,11 @@ classifiers = [
 
 dependencies = [
     "girder>=5.0.0a1",
-    "girder-worker>=5.0.0a1",        # rimuovi se non usi Celery
-    "girder-plugin-worker>=5.0.0a1", # rimuovi se non usi Celery
+    "girder-worker>=5.0.0a1",
+    "girder-plugin-worker>=5.0.0a1",
     "girder-client>=5.0.0a1",
-    # aggiungi qui le dipendenze del tuo dominio, es:
-    # "nibabel>=5.2.0",
-    # "numpy>=1.24.0",
+    "nibabel>=5.2.0",
+    "numpy>=1.24.0",
 ]
 
 [project.optional-dependencies]
@@ -50,12 +37,11 @@ dev = [
     "pytest-girder>=3.0",
 ]
 
-# ── Entry points ───────────────────────────────────────────────────────────────
-# "girder.plugin" → la classe GirderPlugin che Girder carica all'avvio
 [project.entry-points."girder.plugin"]
-plugin_template = "girder_plugin_template:PluginTemplatePlugin"
+diadema_pipeline = "girder_diadema_pipeline:DiademaPlugin"
 
-# "girder_worker_plugins" → l'entry point stevedore per il Celery worker
-# RIMUOVI questa sezione se il plugin non ha task Celery.
 [project.entry-points."girder_worker_plugins"]
-plugin_template_tasks = "girder_plugin_template.worker_entry:load_worker_plugin"
+diadema_pipeline_tasks = "girder_diadema_pipeline.worker_entry:load_worker_plugin"
+
+[tool.setuptools.packages.find]
+include = ["girder_diadema_pipeline*"]

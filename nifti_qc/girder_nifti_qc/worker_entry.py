@@ -81,18 +81,61 @@ def _patch_gw_task_prerun():
             original_fn(task=task, **kwargs)
         except Exception as _e:
             _msg = str(_e)
-            # "Invalid state transition to '2'" è atteso durante un re-delivery
-            # (acks_late): il job è già in stato terminale e gw_task_prerun cerca
-            # di tornare a RUNNING. Non è un errore reale — logghiamo a DEBUG.
-            if "Invalid state transition" in _msg and "Current state is '3'" in _msg:
-                pass  # re-delivery su job già SUCCESS: ignorato silenziosamente
-            else:
+            # Transizioni attese e sicure da ignorare silenziosamente:
+            # - "Current state is '3'" → re-delivery su job già SUCCESS
+            # - "Current state is '5'" → postrun su job già CANCELLED
+            # - "Current state is '824'" → postrun tenta SUCCESS/RUNNING
+            #   su job in CANCELING (824 = girder_plugin_worker CANCELING)
+            _silent = "Invalid state transition" in _msg and any(
+                s in _msg
+                for s in (
+                    "Current state is '3'",  # SUCCESS
+                    "Current state is '5'",  # CANCELLED
+                    "Current state is '824'",  # CANCELING
+                )
+            )
+            if not _silent:
                 print(
                     f"[nifti_qc] gw_task_prerun non-fatal (job già in stato terminale?): {_e}"
                 )
 
     task_prerun.connect(patched_gw_task_prerun, weak=False)
     print(f"[nifti_qc] gw_task_prerun patchato: localhost → {correct_netloc}")
+
+    # ── Patch gw_task_postrun ───────────────────────────────────────────────────
+    # gw_task_postrun tenta di impostare SUCCESS (3) dopo ogni task completato.
+    # Se il task ha sollevato Ignore() (cancel), il job è già in CANCELLED (5):
+    # la transizione 5→3 è invalida e il job resterebbe in stato inconsistente.
+    # Intercettiamo l'eccezione esattamente come facciamo per gw_task_prerun.
+    from celery.signals import task_postrun
+
+    try:
+        import girder_worker.app as _gw_app_post
+
+        original_postrun = getattr(_gw_app_post, "gw_task_postrun", None)
+    except ImportError:
+        original_postrun = None
+
+    if original_postrun is not None:
+        task_postrun.disconnect(original_postrun)
+
+        def patched_gw_task_postrun(**kwargs):
+            try:
+                original_postrun(**kwargs)
+            except Exception as _e:
+                _msg = str(_e)
+                _silent = "Invalid state transition" in _msg and any(
+                    s in _msg
+                    for s in (
+                        "Current state is '5'",  # CANCELLED
+                        "Current state is '824'",  # CANCELING
+                    )
+                )
+                if not _silent:
+                    print(f"[nifti_qc] gw_task_postrun non-fatal: {_e}")
+
+        task_postrun.connect(patched_gw_task_postrun, weak=False)
+        print("[nifti_qc] gw_task_postrun patchato")
 
 
 class NiftiQCWorkerPlugin:

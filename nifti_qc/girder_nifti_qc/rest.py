@@ -47,6 +47,7 @@ class NiftiQC(Resource):
         self.route("POST", (":id", "quick_check"), self.quickCheck)
         self.route("GET", (":id", "results"), self.getResults)
         self.route("DELETE", (":id", "results"), self.deleteResults)
+        self.route("POST", ("cleanup_stuck_jobs",), self.cleanupStuckJobs)
 
     @access.user(scope=TokenScope.DATA_WRITE)
     @autoDescribeRoute(
@@ -104,37 +105,15 @@ class NiftiQC(Resource):
             file_obj = nifti_files[0]
             fileId = str(file_obj["_id"])
 
-        # Create token for worker
-        token = Token().createToken(
-            user=self.getCurrentUser(),
-            days=1,
-            scope=[TokenScope.DATA_READ, TokenScope.DATA_WRITE],
-        )
-
         # Get file name for context
         file_obj = File().load(fileId, force=True)
         file_name = file_obj.get("name", "unknown") if file_obj else "unknown"
 
-        # VERSION CHECK
-        REST_VERSION = "2026-02-20 runMRIQC"
-        print(f"========================================")
-        print(f"REST VERSION: {REST_VERSION}")
-        print(f"========================================")
-        print(f"DEBUG REST runMRIQC: item_id={str(item['_id'])}")
-        print(f"DEBUG REST runMRIQC: file_id={fileId}")
-        print(f"DEBUG REST runMRIQC: file_name={file_name}")
-        print(f"DEBUG REST runMRIQC: modality={modality}")
-        print(f"DEBUG REST runMRIQC: participantLabel={participantLabel}")
-        print(f"DEBUG REST runMRIQC: timeout={timeout}")
-        print(f"DEBUG REST runMRIQC: token={str(token['_id'])}")
-        print(f"DEBUG REST runMRIQC: api_url={getApiUrl()}")
-        print(f"DEBUG REST runMRIQC: About to call apply_async")
-
         job_title = f"MRIQC: {file_name} ({modality}, sub-{participantLabel})"
 
         # Crea il record Job su Girder PRIMA di inviare il task a Celery.
-        # Così il job appare subito in UI con stato QUEUED e il worker
-        # può agganciarsi ad esso tramite job_manager.
+        # Il job deve esistere prima del token perché lo scope del token
+        # include jobs.job_{id} — necessario per il polling dello stato.
         job = Job().createJob(
             title=job_title,
             type="mriqc",
@@ -143,6 +122,20 @@ class NiftiQC(Resource):
         )
         # Job token: scope limitato all'aggiornamento di questo singolo job
         job_token = Job().createJobToken(job)
+
+        # Token worker: creato dopo il job così possiamo includere lo scope
+        # jobs.job_{id} che abilita la lettura dello stato del job.
+        # Senza questo scope GET /job/{id} risponde 401 e il polling di
+        # cancellazione non funziona.
+        token = Token().createToken(
+            user=self.getCurrentUser(),
+            days=1,
+            scope=[
+                TokenScope.DATA_READ,
+                TokenScope.DATA_WRITE,
+                f"jobs.job_{str(job['_id'])}",
+            ],
+        )
         # jobInfoSpec è il formato atteso da girder_worker.utils._job_manager().
         # Deve corrispondere esattamente ai parametri del costruttore JobManager:
         #   logPrint, url, method, headers, reference
@@ -200,6 +193,10 @@ class NiftiQC(Resource):
             print(
                 f"DEBUG REST runMRIQC: apply_async success, celery_id={celery_job.id}, job_id={str(job['_id'])}"
             )
+            # Salva il Celery task ID sul job record: il handler cancel() di
+            # girder_plugin_worker lo usa per revocare il task via AsyncResult.
+            # Senza questo campo il Cancel button non funziona.
+            Job().updateJob(job, otherFields={"celeryTaskId": celery_job.id})
         except Exception as e:
             print(f"DEBUG REST runMRIQC: apply_async FAILED: {e}")
             import traceback
@@ -242,31 +239,11 @@ class NiftiQC(Resource):
             file_obj = nifti_files[0]
             fileId = str(file_obj["_id"])
 
-        token = Token().createToken(
-            user=self.getCurrentUser(),
-            days=1,
-            scope=[TokenScope.DATA_READ, TokenScope.DATA_WRITE],
-        )
-
         # Get file name for context
         file_obj = File().load(fileId, force=True)
         file_name = file_obj.get("name", "unknown") if file_obj else "unknown"
 
-        # VERSION CHECK
-        REST_VERSION = "2026-02-17 12:30:00"
-        print(f"========================================")
-        print(f"REST VERSION: {REST_VERSION}")
-        print(f"========================================")
-
-        # DEBUG REST
-        print(f"DEBUG REST: item_id={str(item['_id'])}")
-        print(f"DEBUG REST: file_id={fileId}")
-        print(f"DEBUG REST: file_name={file_name}")
-        print(f"DEBUG REST: token={str(token['_id'])}")
-        print(f"DEBUG REST: api_url={getApiUrl()}")
-        print(f"DEBUG REST: About to call apply_async with kwargs and options")
-
-        # Crea il record Job su Girder PRIMA di inviare il task a Celery
+        # Crea il job prima del token (serve l'ID per lo scope)
         job = Job().createJob(
             title=f"Quick NIfTI Check: {file_name}",
             type="nifti_quick_check",
@@ -274,6 +251,16 @@ class NiftiQC(Resource):
             handler="worker_handler",
         )
         job_token = Job().createJobToken(job)
+
+        token = Token().createToken(
+            user=self.getCurrentUser(),
+            days=1,
+            scope=[
+                TokenScope.DATA_READ,
+                TokenScope.DATA_WRITE,
+                f"jobs.job_{str(job['_id'])}",
+            ],
+        )
         job_info_spec = {
             "method": "PUT",
             "url": "/".join((_worker_callback_url(), "job", str(job["_id"]))),
@@ -301,6 +288,8 @@ class NiftiQC(Resource):
             },
             queue="mriqc",
         )
+        # Salva il Celery task ID sul job: necessario per il Cancel button.
+        Job().updateJob(job, otherFields={"celeryTaskId": celery_job.id})
 
         return {
             "job_id": str(job["_id"]),
@@ -336,3 +325,63 @@ class NiftiQC(Resource):
         )
 
         return {"message": "QC results deleted"}
+
+    @access.admin
+    @autoDescribeRoute(
+        Description(
+            "Marca come ERROR tutti i job MRIQC/QuickCheck bloccati in QUEUED o RUNNING. "
+            "Da usare dopo un crash/restart del worker per sbloccare la lista job."
+        ).param(
+            "dryRun",
+            "Se true, elenca i job senza modificarli (default: false)",
+            required=False,
+            dataType="boolean",
+            default=False,
+        )
+    )
+    def cleanupStuckJobs(self, dryRun):
+        """Reset job bloccati rimasti in QUEUED/RUNNING dopo un crash del worker."""
+        import datetime
+
+        stuck_types = {"mriqc", "nifti_quick_check"}
+        # JobStatus: QUEUED=1, RUNNING=2
+        stuck_statuses = [JobStatus.QUEUED, JobStatus.RUNNING]
+
+        job_model = Job()
+        stuck = list(
+            job_model.find(
+                {
+                    "type": {"$in": list(stuck_types)},
+                    "status": {"$in": stuck_statuses},
+                }
+            )
+        )
+
+        result = []
+        for job in stuck:
+            result.append(
+                {
+                    "job_id": str(job["_id"]),
+                    "title": job.get("title", ""),
+                    "type": job.get("type", ""),
+                    "status": job.get("status"),
+                    "updated": str(job.get("updated", "")),
+                }
+            )
+            if not dryRun:
+                job_model.updateJob(
+                    job,
+                    status=JobStatus.ERROR,
+                    log=(
+                        f"[nifti_qc] Job marcato come ERROR da cleanupStuckJobs "
+                        f"alle {datetime.datetime.now(datetime.timezone.utc).isoformat()} "
+                        "(worker crash / restart rilevato).\n"
+                    ),
+                )
+
+        return {
+            "dry_run": dryRun,
+            "jobs_found": len(result),
+            "jobs": result,
+            "action": "listed only" if dryRun else "marked as ERROR",
+        }

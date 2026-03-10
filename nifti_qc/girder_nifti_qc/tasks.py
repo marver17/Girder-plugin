@@ -246,17 +246,96 @@ def run_mriqc_task(task, **kwargs):
                 current=40,
             )
 
-            result = subprocess.run(
+            # Usa Popen invece di run() per poter:
+            # 1. Controllare periodicamente se il job è stato cancellato da Girder
+            # 2. Terminare il processo (e tutti i suoi figli) in caso di cancel
+            # start_new_session=True crea un nuovo process group: killpg termina
+            # anche tutti i sottoprocessi avviati da MRIQC (ANTs, FreeSurfer, ecc.)
+            import signal as _signal
+
+            mriqc_proc = subprocess.Popen(
                 mriqc_cmd,
-                capture_output=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
                 text=True,
-                timeout=kwargs.get("timeout", 1800),  # 30 min default
+                start_new_session=True,
             )
 
-            if result.returncode != 0:
-                raise Exception(
-                    f"MRIQC failed with code {result.returncode}: {result.stderr}"
-                )
+            _timeout = kwargs.get("timeout", 1800)
+            _poll_interval = 10  # secondi tra un check-status e il prossimo
+            _elapsed = 0
+
+            # Per il polling usiamo gc (token utente con DATA_READ).
+            # job_token_id ha solo permessi di scrittura sul job — non può
+            # leggere lo stato, quindi le GET fallirebbero silenziosamente.
+
+            while mriqc_proc.poll() is None:
+                import time as _time
+
+                _time.sleep(_poll_interval)
+                _elapsed += _poll_interval
+
+                # Timeout esplicito
+                if _elapsed >= _timeout:
+                    os.killpg(os.getpgid(mriqc_proc.pid), _signal.SIGTERM)
+                    mriqc_proc.wait()
+                    raise subprocess.TimeoutExpired(mriqc_cmd, _timeout)
+
+                # Check cancellazione da Girder (usa gc = token utente con DATA_READ)
+                # Reagisce sia a CANCELING (824) — stato impostato da girder_plugin_worker
+                # quando l'utente preme Cancel — sia a CANCELLED (5).
+                if job_id:
+                    _cancel_requested = False
+                    _cancel_status = None
+                    try:
+                        _job_state = gc.get(f"job/{job_id}")
+                        _cancel_status = _job_state.get("status")
+                        print(
+                            f"[run_mriqc_task] poll job {job_id}: status={_cancel_status}"
+                        )
+                        if _cancel_status in (5, 824):  # 5=CANCELLED, 824=CANCELING
+                            _cancel_requested = True
+                    except Exception as _poll_e:
+                        print(f"[run_mriqc_task] poll status non-fatal: {_poll_e}")
+
+                    # Il kill è FUORI dal try/except HTTP per evitare che
+                    # un'eccezione di os.killpg venga inghiottita silenziosamente.
+                    if _cancel_requested:
+                        print(
+                            f"[run_mriqc_task] Job {job_id} in stato cancel "
+                            f"({_cancel_status}), termino processo MRIQC..."
+                        )
+                        try:
+                            os.killpg(os.getpgid(mriqc_proc.pid), _signal.SIGTERM)
+                            mriqc_proc.wait(timeout=30)
+                        except Exception as _kill_e:
+                            print(f"[run_mriqc_task] killpg non-fatal: {_kill_e}")
+                            try:
+                                mriqc_proc.kill()
+                                mriqc_proc.wait(timeout=10)
+                            except Exception:
+                                pass
+                        _update_item_error(gc, item_id, "Job cancellato dall'utente")
+                        # Imposta CANCELLED (5) usando gc (token utente con scope
+                        # jobs.job_{id}). NON usare job_token_id: ha solo permessi
+                        # di scrittura del log, non di transizione di stato.
+                        # Usa Ignore() invece di return per evitare che @girder_job
+                        # (gw_task_postrun) tenti di impostare SUCCESS (3) da
+                        # CANCELING (824) — transizione invalida che blocca il job.
+                        try:
+                            gc.put(f"job/{job_id}", parameters={"status": 5})
+                            print(f"[run_mriqc_task] Job {job_id} → CANCELLED")
+                        except Exception as _ce:
+                            print(f"[run_mriqc_task] WARNING set CANCELLED: {_ce}")
+                        from celery.exceptions import Ignore
+
+                        raise Ignore()
+
+            stdout, stderr = mriqc_proc.communicate()
+            result_returncode = mriqc_proc.returncode
+
+            if result_returncode != 0:
+                raise Exception(f"MRIQC failed with code {result_returncode}: {stderr}")
 
             safe_progress(message="MRIQC completed, collecting results...", current=80)
 

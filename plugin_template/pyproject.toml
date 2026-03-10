@@ -1,0 +1,61 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# TEMPLATE PLUGIN – pyproject.toml
+#
+# ISTRUZIONI:
+#   1. Sostituisci ogni occorrenza di "plugin_template" / "PluginTemplate"
+#      con il nome reale del tuo plugin.
+#   2. Aggiorna "name", "description", "authors", "keywords", "dependencies".
+#   3. L'entry point "girder.plugin" registra il plugin nel server Girder.
+#   4. L'entry point "girder_worker_plugins" registra i task Celery via
+#      stevedore. Rimuovilo se il plugin non ha task Celery.
+# ──────────────────────────────────────────────────────────────────────────────
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "girder-plugin-template"
+version = "0.1.0"
+description = "Template plugin for Girder – replace this description"
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "Apache-2.0"}
+authors = [
+    {name = "Your Name", email = "you@example.com"}
+]
+keywords = ["girder", "plugin", "template"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Web Environment",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+]
+
+dependencies = [
+    "girder>=5.0.0a1",
+    "girder-worker>=5.0.0a1",        # rimuovi se non usi Celery
+    "girder-plugin-worker>=5.0.0a1", # rimuovi se non usi Celery
+    "girder-client>=5.0.0a1",
+    # aggiungi qui le dipendenze del tuo dominio, es:
+    # "nibabel>=5.2.0",
+    # "numpy>=1.24.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "pytest-girder>=3.0",
+]
+
+# ── Entry points ───────────────────────────────────────────────────────────────
+# "girder.plugin" → la classe GirderPlugin che Girder carica all'avvio
+[project.entry-points."girder.plugin"]
+plugin_template = "girder_plugin_template:PluginTemplatePlugin"
+
+# "girder_worker_plugins" → l'entry point stevedore per il Celery worker
+# RIMUOVI questa sezione se il plugin non ha task Celery.
+[project.entry-points."girder_worker_plugins"]
+plugin_template_tasks = "girder_plugin_template.worker_entry:load_worker_plugin"

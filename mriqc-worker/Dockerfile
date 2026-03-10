@@ -33,4 +33,6 @@ CMD ["sh", "-c", \
         --queues=mriqc \
         --loglevel=info \
         --pool=solo \
-        --concurrency=1"]
+        --concurrency=1 \
+        --heartbeat-interval=0 \
+        --include=girder_nifti_qc.tasks"]

@@ -126,6 +126,16 @@ services:
       # The Girder server dispatches jobs with its own localhost URL which is
       # unreachable from other containers — this env var overrides it.
       - GIRDER_API_URL=http://girder:8080/api/v1
+      # ── Heartbeat / connection stability ──────────────────────────────────────
+      # MRIQC tasks run for 5-30 minutes. With --pool=solo the main thread is
+      # blocked during execution, so Celery can't send AMQP heartbeats.
+      # RabbitMQ's default heartbeat timeout is 60 s → connection is closed →
+      # Celery can't ACK the finished task → message is redelivered → infinite loop.
+      # Fix: disable heartbeat on the broker connection (0 = disabled).
+      - CELERY_BROKER_HEARTBEAT=0
+      # Also cancel tasks on connection loss so they are not silently redelivered
+      # when the worker reconnects (belt-and-suspenders with the heartbeat fix).
+      - CELERY_WORKER_CANCEL_LONG_RUNNING_TASKS_ON_CONNECTION_LOSS=true
     volumes:
       - ./nifti_qc:/opt/nifti_qc # live-edit tasks.py without rebuild
     restart: unless-stopped

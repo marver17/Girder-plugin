@@ -80,9 +80,16 @@ def _patch_gw_task_prerun():
         try:
             original_fn(task=task, **kwargs)
         except Exception as _e:
-            print(
-                f"[nifti_qc] gw_task_prerun non-fatal (job già in stato terminale?): {_e}"
-            )
+            _msg = str(_e)
+            # "Invalid state transition to '2'" è atteso durante un re-delivery
+            # (acks_late): il job è già in stato terminale e gw_task_prerun cerca
+            # di tornare a RUNNING. Non è un errore reale — logghiamo a DEBUG.
+            if "Invalid state transition" in _msg and "Current state is '3'" in _msg:
+                pass  # re-delivery su job già SUCCESS: ignorato silenziosamente
+            else:
+                print(
+                    f"[nifti_qc] gw_task_prerun non-fatal (job già in stato terminale?): {_e}"
+                )
 
     task_prerun.connect(patched_gw_task_prerun, weak=False)
     print(f"[nifti_qc] gw_task_prerun patchato: localhost → {correct_netloc}")
@@ -97,6 +104,26 @@ class NiftiQCWorkerPlugin:
         # A questo punto gw_task_prerun è già registrato (girder_worker.app è importato)
         # ma nessun task è ancora stato ricevuto — momento ideale per wrapparlo.
         _patch_gw_task_prerun()
+
+        # ── Disabilita l'AMQP heartbeat ─────────────────────────────────────────
+        # Con --pool=solo il thread principale è bloccato durante l'esecuzione
+        # del task (MRIQC dura 5-30 min): Celery non può inviare heartbeat AMQP.
+        # RabbitMQ chiude la connessione dopo il timeout (default 60 s) →
+        # l'ACK del task completato fallisce → il messaggio viene ri-consegnato.
+        # Impostare broker_heartbeat=0 disabilita il meccanismo côté client:
+        # RabbitMQ non si aspetta heartbeat e non chiude la connessione.
+        # Questo è il punto più tardivo in cui la configurazione può essere
+        # iniettata prima che il worker stabilisca la connessione AMQP.
+        self.app.conf.broker_heartbeat = 0
+        self.app.conf.broker_transport_options = {
+            **self.app.conf.broker_transport_options,
+            "heartbeat": 0,
+        }
+        # Celery 5.x: se nonostante tutto la connessione cade mentre un task
+        # è in esecuzione, cancella il task anziché lasciarlo completare senza
+        # poter fare l'ACK (evita il re-delivery silenzioso).
+        self.app.conf.worker_cancel_long_running_tasks_on_connection_loss = True
+        # ────────────────────────────────────────────────────────────────────────
 
     def task_imports(self):
         """Restituisce la lista dei moduli che contengono i task Celery.

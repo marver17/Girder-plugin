@@ -72,6 +72,37 @@ def run_mriqc_task(task, **kwargs):
     gc = GirderClient(apiUrl=girder_api_url)
     gc.token = girder_client_token
 
+    # ── Guardia di idempotenza ──────────────────────────────────────────────────
+    # girder_worker usa acks_late=True: il messaggio RabbitMQ viene ACK'd DOPO
+    # il completamento del task. Se gw_task_postrun fallisce (es. eccezione non
+    # gestita), il broker ri-consegna il messaggio e il task viene rieseguito
+    # più volte con lo stesso job_id.
+    # Se il job è già in uno stato terminale (SUCCESS=3, ERROR=4, CANCELLED=5),
+    # il task è già stato eseguito: usciamo subito senza fare nulla.
+    if job_id and job_token_id:
+        try:
+            _guard_gc = GirderClient(apiUrl=girder_api_url)
+            _guard_gc.token = job_token_id
+            _current_job = _guard_gc.get(f"job/{job_id}")
+            _current_status = _current_job.get("status", 0)
+            # 3=SUCCESS  4=ERROR  5=CANCELLED
+            if _current_status in (3, 4, 5):
+                print(
+                    f"[run_mriqc_task] Job {job_id} già in stato terminale "
+                    f"({_current_status}), skip ri-esecuzione (acks_late re-delivery)"
+                )
+                return {
+                    "status": "skipped",
+                    "reason": "job already in terminal state",
+                    "job_status": _current_status,
+                }
+        except Exception as _guard_e:
+            # Se non riusciamo a verificare lo stato, procediamo cauti.
+            print(
+                f"[run_mriqc_task] Impossibile verificare stato job (procedo): {_guard_e}"
+            )
+    # ────────────────────────────────────────────────────────────────────────────
+
     # Transizione QUEUED → RUNNING esplicita.
     # Il segnale task_prerun di girder_worker dovrebbe farlo automaticamente,
     # ma in alcune configurazioni non si aggancia correttamente: il job
@@ -339,6 +370,29 @@ def quick_nifti_check(task, **kwargs):
 
     gc = GirderClient(apiUrl=girder_api_url)
     gc.token = girder_client_token
+
+    # ── Guardia di idempotenza (stessa logica di run_mriqc_task) ───────────────
+    if job_id and job_token_id:
+        try:
+            _guard_gc = GirderClient(apiUrl=girder_api_url)
+            _guard_gc.token = job_token_id
+            _current_job = _guard_gc.get(f"job/{job_id}")
+            _current_status = _current_job.get("status", 0)
+            if _current_status in (3, 4, 5):
+                print(
+                    f"[quick_nifti_check] Job {job_id} già in stato terminale "
+                    f"({_current_status}), skip ri-esecuzione"
+                )
+                return {
+                    "status": "skipped",
+                    "reason": "job already in terminal state",
+                    "job_status": _current_status,
+                }
+        except Exception as _guard_e:
+            print(
+                f"[quick_nifti_check] Impossibile verificare stato job (procedo): {_guard_e}"
+            )
+    # ────────────────────────────────────────────────────────────────────────────
 
     # Transizione QUEUED → RUNNING esplicita (stessa logica di run_mriqc_task).
     if job_id and job_token_id:

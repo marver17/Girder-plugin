@@ -20,7 +20,7 @@ from girder_jobs.models.job import Job
 # Tool supportati → coda Celery + task name (da aggiungere man mano)
 _TOOL_CONFIG = {
     "mriqc": {
-        "queue": "mriqc",
+        "queue": "diadema_mriqc",
         "job_type": "diadema_mriqc",
         "title_prefix": "DIADEMA MRI QC",
         "result_field": "diadema_mriqc",

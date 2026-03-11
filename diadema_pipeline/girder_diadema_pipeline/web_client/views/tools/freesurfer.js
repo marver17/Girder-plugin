@@ -15,8 +15,9 @@ const FreesurferTool = {
             name: 'participantLabel',
             label: 'Participant Label',
             type: 'text',
-            default: '001',
-            hint: 'Usato come subject ID per FreeSurfer.',
+            default: '',
+            hint: 'Etichetta BIDS senza prefisso sub- (es. 003). '
+                + 'Lasciare vuoto: rilevata automaticamente da nome file → cartella padre → gerarchia.',
         },
         {
             name: 'directive',
@@ -46,6 +47,14 @@ const FreesurferTool = {
             type: 'text',
             default: '',
             hint: 'Es: -no-isrunning -cw256. Lasciare vuoto per il default.',
+        },
+        {
+            name: 'derivativesRootId',
+            label: 'Dataset root (ID folder)',
+            type: 'text',
+            default: '',
+            hint: 'ID Girder della folder radice del dataset BIDS. '
+                + 'Lascia vuoto per stima automatica.',
         },
     ],
 };

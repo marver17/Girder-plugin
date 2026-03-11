@@ -53,6 +53,8 @@ from girder_worker.app import app
 from girder_worker.utils import girder_job
 
 from ._helpers import (
+    bids_resolve_participant_label,
+    bids_upload_derivative,
     idempotency_guard,
     kill_proc,
     make_safe_progress,
@@ -221,6 +223,10 @@ def upload_freesurfer_results(task, **kwargs):
     stats = kwargs.get("stats", {})
     result_meta = kwargs.get("result_meta", {})
     keep_subjects_dir = bool(kwargs.get("keep_subjects_dir", True))
+    derivatives_root_id = kwargs.get("derivatives_root_id") or None
+    participant_label = bids_resolve_participant_label(
+        gc, item_id, kwargs.get("participant_label")
+    )
 
     girder_api_url = resolve_girder_url(task)
     girder_client_token = getattr(task.request, "girder_client_token", None)
@@ -229,16 +235,31 @@ def upload_freesurfer_results(task, **kwargs):
     gc.token = girder_client_token
 
     progress = make_safe_progress(task, TASK_NAME)
-    progress("Upload risultati FreeSurfer su Girder...", total=100, current=5)
+    progress(
+        "Upload risultati FreeSurfer su Girder (BIDS derivatives)...",
+        total=100,
+        current=5,
+    )
 
     subject_dir = Path(subject_dir_str)
     uploaded = []
+    derivative_item_ids = []
 
-    # Log completo recon-all
+    # Log completo recon-all → derivatives/freesurfer/sub-xxx/
     log_file = subject_dir / "scripts" / "recon-all.log"
     if log_file.exists():
-        gc.uploadFileToItem(item_id, str(log_file))
+        iid = bids_upload_derivative(
+            gc,
+            item_id,
+            log_file,
+            datatype="anat",
+            participant_label=participant_label,
+            derivatives_root_id=derivatives_root_id,
+            pipeline_name="freesurfer",
+        )
         uploaded.append("recon-all.log")
+        if iid:
+            derivative_item_ids.append(iid)
         progress("Log recon-all caricato.", current=30)
 
     # File *.stats
@@ -246,8 +267,18 @@ def upload_freesurfer_results(task, **kwargs):
     if stats_path.exists():
         stat_files = sorted(stats_path.glob("*.stats"))
         for i, sf in enumerate(stat_files):
-            gc.uploadFileToItem(item_id, str(sf))
+            iid = bids_upload_derivative(
+                gc,
+                item_id,
+                sf,
+                datatype="anat",
+                participant_label=participant_label,
+                derivatives_root_id=derivatives_root_id,
+                pipeline_name="freesurfer",
+            )
             uploaded.append(sf.name)
+            if iid:
+                derivative_item_ids.append(iid)
             pct = 30 + int((i + 1) / max(len(stat_files), 1) * 40)
             progress(f"Caricato {sf.name}", current=pct)
 
@@ -258,8 +289,18 @@ def upload_freesurfer_results(task, **kwargs):
         json.dump(stats, tmp, indent=2)
         tmp_path = Path(tmp.name)
     try:
-        gc.uploadFileToItem(item_id, str(tmp_path))
+        iid = bids_upload_derivative(
+            gc,
+            item_id,
+            tmp_path,
+            datatype="anat",
+            participant_label=participant_label,
+            derivatives_root_id=derivatives_root_id,
+            pipeline_name="freesurfer",
+        )
         uploaded.append("freesurfer_stats.json")
+        if iid:
+            derivative_item_ids.append(iid)
     finally:
         tmp_path.unlink(missing_ok=True)
 
@@ -272,6 +313,7 @@ def upload_freesurfer_results(task, **kwargs):
             **result_meta,
             "stats": stats,
             "files_uploaded": uploaded,
+            "derivative_item_ids": derivative_item_ids,
         },
         status="completed",
     )
@@ -315,7 +357,7 @@ def run_freesurfer_task(task, **kwargs):
     item_id = kwargs.get("item_id")
     file_id = kwargs.get("file_id")
     file_name = kwargs.get("file_name", "unknown file")
-    participant_label = kwargs.get("participant_label", "001")
+    participant_label_hint = kwargs.get("participant_label") or ""
     directive = kwargs.get("directive", "-all").strip()
     hemi = kwargs.get("hemi", "both")  # both | lh | rh
     openmp_threads = int(kwargs.get("openmp_threads", 4))
@@ -329,6 +371,7 @@ def run_freesurfer_task(task, **kwargs):
     subjects_dir_kwarg = kwargs.get("subjects_dir")
     keep_subjects_dir = bool(kwargs.get("keep_subjects_dir", True))
     timeout = int(kwargs.get("timeout", 14400))  # 4 ore default
+    derivatives_root_id = kwargs.get("derivatives_root_id") or None
     job_id = kwargs.get("job_id")
     job_token_id = kwargs.get("job_token_id")
     # ─────────────────────────────────────────────────────────────────────────
@@ -338,6 +381,11 @@ def run_freesurfer_task(task, **kwargs):
 
     gc = GirderClient(apiUrl=girder_api_url)
     gc.token = girder_client_token
+
+    # Risolve participant_label: hint esplicito → filename → gerarchia folder → fallback
+    participant_label = bids_resolve_participant_label(
+        gc, item_id, participant_label_hint
+    )
 
     if idempotency_guard(girder_api_url, job_id, job_token_id, TASK_NAME):
         return {"status": "skipped", "reason": "job already terminal"}
@@ -495,8 +543,6 @@ def run_freesurfer_task(task, **kwargs):
                         },
                     )
                     set_job_cancelled(gc, job_id, TASK_NAME)
-                    from celery.exceptions import Ignore
-
                     raise Ignore()
 
             _log_thread.join(timeout=10)
@@ -538,6 +584,8 @@ def run_freesurfer_task(task, **kwargs):
                     stats=stats,
                     result_meta=result_meta,
                     keep_subjects_dir=keep_subjects_dir,
+                    derivatives_root_id=derivatives_root_id,
+                    participant_label=participant_label,
                 ),
                 headers={
                     "girder_client_token": girder_client_token,

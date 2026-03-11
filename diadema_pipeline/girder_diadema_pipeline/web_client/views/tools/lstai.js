@@ -15,8 +15,9 @@ const LstaiTool = {
             name: 'participantLabel',
             label: 'Participant Label',
             type: 'text',
-            default: '001',
-            hint: 'Etichetta del soggetto.',
+            default: '',
+            hint: 'Etichetta BIDS senza prefisso sub- (es. 003). '
+                + 'Lasciare vuoto: rilevata automaticamente da nome file → cartella padre → gerarchia.',
         },
         {
             name: 'inputType',

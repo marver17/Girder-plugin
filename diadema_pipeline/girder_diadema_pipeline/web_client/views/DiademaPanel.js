@@ -88,14 +88,23 @@ const DiademaPanel = {
     // ── Aggiorna il bottone Run in base allo stato del tool selezionato ───────
 
     _updateRunButtonState(itemView, $panel) {
-        const ACTIVE = ['running', 'queued', 'processing'];
+        const ACTIVE = ['running', 'queued', 'processing', 'uploading', 'cancelling'];
+        const CANCELLABLE = ['running', 'queued', 'processing', 'uploading'];
         const tool = DiademaPanel._getSelectedTool($panel);
         const { status } = DiademaPanel._getToolMeta(itemView.model, tool);
         const $btn = $panel.find('.g-diadema-run-btn');
+        const $cancelBtn = $panel.find('.g-diadema-cancel-btn');
         if (ACTIVE.includes(status)) {
             $btn.prop('disabled', true).html('<i class="icon-spin3 animate-spin"></i> In corso…');
+            if (CANCELLABLE.includes(status)) {
+                $cancelBtn.show().prop('disabled', false).html('<i class="icon-cancel"></i> Cancel');
+            } else {
+                // cancelling in corso
+                $cancelBtn.show().prop('disabled', true).html('<i class="icon-spin3 animate-spin"></i> Cancelling…');
+            }
         } else {
             $btn.prop('disabled', false).html('<i class="icon-play"></i> Run');
+            $cancelBtn.hide();
         }
     },
 
@@ -119,6 +128,9 @@ const DiademaPanel = {
                 <div class="g-diadema-actions" style="display: flex; gap: 8px; align-items: center;">
                     <button class="btn btn-sm btn-primary g-diadema-run-btn" style="min-width: 80px;">
                         <i class="icon-play"></i> Run
+                    </button>
+                    <button class="btn btn-sm btn-danger g-diadema-cancel-btn" style="min-width: 80px; display: none;">
+                        <i class="icon-cancel"></i> Cancel
                     </button>
                     <button class="btn btn-sm btn-default g-diadema-advanced-btn" title="Mostra/nascondi parametri avanzati">
                         <i class="icon-cog"></i> Advanced <span class="g-diadema-chevron">▾</span>
@@ -204,6 +216,11 @@ const DiademaPanel = {
         $panel.find('.g-diadema-run-btn').on('click', () => {
             DiademaPanel._onRun(itemView, $panel);
         });
+
+        // Cancel
+        $panel.find('.g-diadema-cancel-btn').on('click', () => {
+            DiademaPanel._onCancel(itemView, $panel);
+        });
     },
 
     // ── Selezione tool corrente ────────────────────────────────────────────────
@@ -242,6 +259,20 @@ const DiademaPanel = {
                 </div>
             </div>` : '';
 
+        // Banner preview participant label (tutti i tool che hanno il campo)
+        const hasParticipantLabel = tool.params.some(p => p.name === 'participantLabel');
+        const participantPreview = hasParticipantLabel ? `
+            <div class="g-diadema-participant-preview" style="
+                margin-top: 8px; padding: 8px 10px; border-radius: 4px;
+                background: #f4faf0; border: 1px solid #b8dea8; font-size: 11px;">
+                <div style="font-weight: 600; color: #3a7a2a; margin-bottom: 4px;">
+                    <i class="icon-user"></i> Participant Label rilevato
+                </div>
+                <div class="g-participant-label-text" style="color: #555;">
+                    <i class="icon-spin3 animate-spin"></i> Calcolo…
+                </div>
+            </div>` : '';
+
         $form.html(`
             <div style="padding-bottom: 4px; margin-bottom: 10px; border-bottom: 1px solid #eee;">
                 <strong style="font-size: 13px; color: #555;">
@@ -253,6 +284,7 @@ const DiademaPanel = {
                 ${fields}
             </div>
             ${derivativesPreview}
+            ${participantPreview}
         `);
 
         // Preview iniziale e aggiornamento live su modifica del campo
@@ -263,6 +295,57 @@ const DiademaPanel = {
                 DiademaPanel._refreshDerivativesPreview(itemView, $form, $(this).val().trim());
             });
         }
+
+        if (hasParticipantLabel) {
+            DiademaPanel._refreshParticipantLabelPreview(itemView, $form, '');
+            $form.on('input change', '[data-param="participantLabel"]', function () {
+                DiademaPanel._refreshParticipantLabelPreview(itemView, $form, $(this).val().trim());
+            });
+        }
+    },
+
+    _refreshParticipantLabelPreview(itemView, $form, hint) {
+        const itemId = itemView.model.id;
+        const $text = $form.find('.g-participant-label-text');
+        if (!$text.length) return;
+
+        $text.html('<i class="icon-spin3 animate-spin"></i> Calcolo…');
+
+        const data = {};
+        if (hint) data.hint = hint;
+
+        restRequest({
+            method: 'GET',
+            url: `diadema_pipeline/${itemId}/participant_label`,
+            data,
+            error: null,
+        }).then((resp) => {
+            const sourceMap = {
+                manual:   { color: '#2a5a99', icon: 'icon-pencil',    label: 'manuale' },
+                filename: { color: '#2a7a2a', icon: 'icon-doc-text',  label: 'da filename' },
+                folder:   { color: '#7a5a00', icon: 'icon-folder',    label: 'da cartella' },
+                fallback: { color: '#999',    icon: 'icon-attention', label: 'fallback' },
+            };
+
+            // Se è il caricamento iniziale (campo vuoto o valore di fallback salvato)
+            // e il valore è stato rilevato con certezza, pre-compila il campo
+            const $input = $form.find('[data-param="participantLabel"]');
+            const isInitialLoad = !hint;
+            if (isInitialLoad && resp.source !== 'fallback') {
+                $input.val(resp.label);
+            }
+
+            const s = sourceMap[resp.source] || sourceMap.fallback;
+            $text.html(`
+                <span style="color:${s.color}; font-weight:600;">
+                    <i class="${s.icon}"></i>
+                    sub-<strong>${resp.label}</strong>
+                </span>
+                <span style="color:#999; margin-left:6px;">(${s.label})</span>
+            `);
+        }).catch(() => {
+            $text.html('<span style="color:#999;">Anteprima non disponibile</span>');
+        });
     },
 
     _refreshDerivativesPreview(itemView, $form, overrideId) {
@@ -437,6 +520,46 @@ const DiademaPanel = {
         return { participantLabel, modality };
     },
 
+    // ── Handler bottone Cancel ────────────────────────────────────────────────
+
+    _onCancel(itemView, $panel) {
+        const tool = DiademaPanel._getSelectedTool($panel);
+        const itemId = itemView.model.id;
+        const $cancelBtn = $panel.find('.g-diadema-cancel-btn');
+
+        // eslint-disable-next-line no-alert
+        if (!window.confirm(`Vuoi annullare il job ${tool.label} in corso?`)) return;
+
+        $cancelBtn.prop('disabled', true).html('<i class="icon-spin3 animate-spin"></i> Cancelling…');
+
+        restRequest({
+            method: 'POST',
+            url: `diadema_pipeline/${itemId}/cancel/${tool.id}`,
+        }).done(() => {
+            events.trigger('g:alert', {
+                icon: 'attention',
+                text: `${tool.label}: richiesta di cancellazione inviata. Il job si fermerà a breve.`,
+                type: 'warning',
+                timeout: 5000,
+            });
+            // Aggiorna subito il modello
+            const curDiadema = Object.assign({}, itemView.model.get('diadema') || {});
+            curDiadema[tool.id] = Object.assign({}, curDiadema[tool.id] || {}, { status: 'cancelling' });
+            itemView.model.set('diadema', curDiadema);
+            DiademaPanel._setBadge($panel, tool.id, 'cancelling');
+            DiademaPanel._updateRunButtonState(itemView, $panel);
+        }).fail(err => {
+            const msg = err.responseJSON?.message || 'Errore sconosciuto';
+            events.trigger('g:alert', {
+                icon: 'cancel',
+                text: `Errore cancellazione ${tool.label}: ${msg}`,
+                type: 'danger',
+                timeout: 5000,
+            });
+            $cancelBtn.prop('disabled', false).html('<i class="icon-cancel"></i> Cancel');
+        });
+    },
+
     // ── Handler bottone Run ───────────────────────────────────────────────────
 
     _onRun(itemView, $panel) {
@@ -537,6 +660,18 @@ const DiademaPanel = {
                         type: 'success',
                         timeout: 4000,
                     });
+                    DiademaPanel._updateRunButtonState(itemView, $panel);
+
+                } else if (status === 'cancelled' || status === 'cancelling') {
+                    events.trigger('g:alert', {
+                        icon: 'attention',
+                        text: `${tool.label} annullato.`,
+                        type: 'warning',
+                        timeout: 4000,
+                    });
+                    const curDia = Object.assign({}, itemView.model.get('diadema') || {});
+                    curDia[toolId] = Object.assign({}, curDia[toolId] || {}, { status: 'cancelled' });
+                    itemView.model.set('diadema', curDia);
                     DiademaPanel._updateRunButtonState(itemView, $panel);
 
                 } else if (status === 'error') {

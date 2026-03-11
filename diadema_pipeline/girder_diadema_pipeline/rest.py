@@ -7,9 +7,10 @@ che accetta i parametri del tool e li invia alla coda Celery corretta.
 import logging
 import os
 
+import cherrypy
 from girder.api import access
 from girder.api.describe import Description, autoDescribeRoute
-from girder.api.rest import Resource, filtermodel, getApiUrl
+from girder.api.rest import Resource, filtermodel, getApiUrl, getCurrentToken
 from girder.constants import AccessType, TokenScope
 from girder.exceptions import RestException
 from girder.models.file import File
@@ -58,9 +59,11 @@ class DiademaResource(Resource):
         self.resourceName = "diadema_pipeline"
 
         self.route("POST", (":id", "run", ":toolId"), self.runTool)
+        self.route("POST", (":id", "cancel", ":toolId"), self.cancelJob)
         self.route("PUT", (":id", "processing", ":toolId"), self.updateProcessing)
         self.route("GET", (":id", "results"), self.getResults)
         self.route("GET", (":id", "derivatives_root"), self.resolveDerivativesRoot)
+        self.route("GET", (":id", "participant_label"), self.resolveParticipantLabel)
         self.route("DELETE", (":id", "results", ":toolId"), self.deleteResults)
         self.route("POST", ("cleanup_stuck_jobs",), self.cleanupStuckJobs)
         self.route("GET", ("settings",), self.getSettings)
@@ -82,7 +85,10 @@ class DiademaResource(Resource):
         .param("fileId", "ID file specifico (opzionale)", required=False)
         # Parametri comuni
         .param(
-            "participantLabel", "BIDS participant label", required=False, default="001"
+            "participantLabel",
+            "BIDS participant label (es. 003). Vuoto = rilevazione automatica da nome file/cartella",
+            required=False,
+            default="",
         )
         # Parametri MRIQC
         .param(
@@ -307,6 +313,7 @@ class DiademaResource(Resource):
                 subjects_dir=subjectsDir or _settings_subjects_dir or None,
                 keep_subjects_dir=keepSubjectsDir,
                 timeout=fsTimeout,
+                derivatives_root_id=derivativesRootId or None,
             )
         else:  # lstai
             from .tasks import run_lstai_task as celery_task
@@ -410,6 +417,56 @@ class DiademaResource(Resource):
             "item_id": str(item["_id"]),
             "tool": toolId,
             "status": "queued",
+        }
+
+    @access.user(scope=TokenScope.DATA_READ)
+    @autoDescribeRoute(
+        Description(
+            "Anteprima del participant label BIDS che verrebbe rilevato automaticamente per questo item."
+        )
+        .modelParam("id", model=Item, level=AccessType.READ, destName="item")
+        .param(
+            "hint",
+            "Valore esplicito (come da form). Vuoto = auto-detect puro.",
+            required=False,
+            default="",
+        )
+    )
+    def resolveParticipantLabel(self, item, hint, params):
+        from girder_client import GirderClient
+
+        from .tasks._helpers import bids_resolve_participant_label
+
+        token = getCurrentToken()
+        gc = GirderClient(apiUrl=cherrypy.request.base + "/api/v1")
+        gc.token = str(token["_id"])
+
+        item_id = str(item["_id"])
+        resolved = bids_resolve_participant_label(gc, item_id, hint or None)
+
+        # Determina la sorgente per l'UI
+        hint_clean = (hint or "").strip().lstrip("sub-").lstrip("sub_")
+        import re
+
+        item_name = item.get("name", "")
+        m_file = re.search(
+            r"(?:^|[_\-.])sub[-_]([a-zA-Z0-9]+)", item_name, re.IGNORECASE
+        )
+
+        if hint_clean and re.sub(r"[^a-zA-Z0-9]", "", hint_clean):
+            source = "manual"
+        elif m_file and m_file.group(1) == resolved:
+            source = "filename"
+        elif resolved != "001":
+            source = "folder"
+        else:
+            source = "fallback"
+
+        return {
+            "label": resolved,
+            "subject_id": f"sub-{resolved}",
+            "source": source,
+            "item_name": item_name,
         }
 
     @access.user(scope=TokenScope.DATA_READ)
@@ -565,6 +622,54 @@ class DiademaResource(Resource):
 
     @access.user(scope=TokenScope.DATA_WRITE)
     @autoDescribeRoute(
+        Description("Cancella un job DIADEMA in corso")
+        .modelParam("id", model=Item, level=AccessType.WRITE, destName="item")
+        .param("toolId", "Tool: mriqc | freesurfer | lstai", paramType="path")
+        .errorResponse("Tool non supportato", 400)
+        .errorResponse("Nessun job attivo", 400)
+        .errorResponse("Job non trovato", 404)
+    )
+    def cancelJob(self, item, toolId, params):
+        if toolId not in _TOOL_CONFIG:
+            raise RestException(f"Tool non supportato: {toolId}", 400)
+
+        diadema = item.get("diadema") or {}
+        tool_data = diadema.get(toolId) or {}
+        status = tool_data.get("status")
+        job_id = tool_data.get("job_id")
+
+        if status not in ("running", "queued", "processing", "uploading"):
+            raise RestException(
+                f"Nessun job attivo per '{toolId}' (stato: {status})", 400
+            )
+        if not job_id:
+            raise RestException(f"job_id non trovato per '{toolId}'", 400)
+
+        from bson import ObjectId
+
+        job = Job().load(ObjectId(job_id), force=True)
+        if not job:
+            raise RestException(f"Job {job_id} non trovato", 404)
+
+        # Forza lo stato CANCELING (824) direttamente su MongoDB,
+        # bypassando la validazione delle transizioni di stato di Girder
+        # (che non ammette tutte le transizioni verso 824 da stati intermedi)
+        Job().update(
+            {"_id": job["_id"]},
+            {"$set": {"status": 824}},
+            multi=False,
+        )
+
+        # Aggiorna subito item.diadema per feedback immediato in UI
+        Item().update(
+            {"_id": item["_id"]},
+            {"$set": {f"diadema.{toolId}.status": "cancelling"}},
+            multi=False,
+        )
+        return {"cancelled": True, "job_id": job_id, "tool": toolId}
+
+    @access.user(scope=TokenScope.DATA_WRITE)
+    @autoDescribeRoute(
         Description(
             "Aggiorna i dati di elaborazione DIADEMA per un tool (usato dai worker)"
         )
@@ -696,4 +801,5 @@ class DiademaResource(Resource):
             Setting().set(key, value)
             updated[key] = value
             logger.info("[diadema_pipeline] Settings aggiornati: %s = %r", key, value)
+        return {"updated": updated}
         return {"updated": updated}

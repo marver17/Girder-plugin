@@ -10,6 +10,7 @@ Ordine di priorità per resolve_dir:
 import datetime
 import logging
 import os
+import re
 import subprocess
 from pathlib import Path
 
@@ -267,6 +268,74 @@ def bids_find_dataset_root(gc, item_id):
     except Exception as exc:
         logger.warning("[bids] bids_find_dataset_root fallito: %s", exc)
         return (None, None)
+
+
+def bids_resolve_participant_label(gc, item_id, hint=None):
+    """
+    Determina il BIDS participant label per un item Girder.
+
+    Strategia (in ordine):
+      1. ``hint`` esplicito (se non vuoto) – rimuove eventuale prefisso "sub-"
+      2. Pattern ``sub-XXX`` nel nome del file/item
+      3. Cartelle padre in gerarchia (risale fino a 8 livelli, cerca ``sub-XXX``)
+      4. Fallback: stem del filename sanitizzato (solo [a-zA-Z0-9]), max 32 char
+
+    Returns:
+        str: participant label (senza prefisso ``sub-``)
+    """
+    hint = (hint or "").strip()
+    if hint:
+        # Rimuovi prefisso "sub-" se l'utente lo ha incluso per comodità
+        if hint.lower().startswith("sub-"):
+            hint = hint[4:]
+        safe = re.sub(r"[^a-zA-Z0-9]", "", hint)
+        return safe or "001"
+
+    try:
+        item_doc = gc.get(f"item/{item_id}")
+        item_name = item_doc.get("name", "")
+
+        # 1. Cerca sub-XXX nel nome file (es. sub-003_T1w.nii.gz)
+        m = re.search(r"(?:^|[_\-.])sub[-_]([a-zA-Z0-9]+)", item_name, re.IGNORECASE)
+        if m:
+            logger.debug("[bids] participant_label da filename: %s", m.group(1))
+            return m.group(1)
+
+        # 2. Risali la gerarchia folder cercando sub-XXX
+        folder_id = str(item_doc.get("folderId", ""))
+        for _ in range(8):
+            if not folder_id:
+                break
+            folder_doc = gc.get(f"folder/{folder_id}")
+            folder_name = folder_doc.get("name", "")
+            m = re.match(r"^sub[-_]([a-zA-Z0-9]+)$", folder_name, re.IGNORECASE)
+            if m:
+                logger.debug(
+                    "[bids] participant_label da folder '%s': %s",
+                    folder_name,
+                    m.group(1),
+                )
+                return m.group(1)
+            parent_type = folder_doc.get("parentCollection", "folder")
+            if parent_type != "folder":
+                break
+            folder_id = str(folder_doc.get("parentId", ""))
+
+        # 3. Fallback: stem del filename
+        stem = item_name
+        for ext in (".nii.gz", ".nii", ".json", ".tsv", ".csv", ".dcm"):
+            if stem.lower().endswith(ext):
+                stem = stem[: -len(ext)]
+                break
+        safe = re.sub(r"[^a-zA-Z0-9]", "", stem)
+        if safe:
+            logger.debug("[bids] participant_label da stem filename: %s", safe[:32])
+            return safe[:32]
+
+    except Exception as exc:
+        logger.warning("[bids] bids_resolve_participant_label fallito: %s", exc)
+
+    return "001"
 
 
 def bids_upload_derivative(

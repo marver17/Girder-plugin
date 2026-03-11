@@ -28,6 +28,7 @@ from girder_worker.app import app
 from girder_worker.utils import girder_job
 
 from ._helpers import (
+    bids_resolve_participant_label,
     bids_upload_derivative,
     idempotency_guard,
     kill_proc,
@@ -84,7 +85,7 @@ def run_mriqc_task(task, **kwargs):
     item_id = kwargs.get("item_id")
     file_id = kwargs.get("file_id")
     file_name = kwargs.get("file_name", "unknown file")
-    participant_label = kwargs.get("participant_label", "001")
+    participant_label_hint = kwargs.get("participant_label") or ""
     modality = kwargs.get("modality", "T1w")
     timeout = int(kwargs.get("timeout", 1800))
     output_base_dir = kwargs.get("output_base_dir")
@@ -98,6 +99,11 @@ def run_mriqc_task(task, **kwargs):
 
     gc = GirderClient(apiUrl=girder_api_url)
     gc.token = girder_client_token
+
+    # Risolve participant_label ora che gc è disponibile
+    participant_label = bids_resolve_participant_label(
+        gc, item_id, participant_label_hint
+    )
 
     if idempotency_guard(girder_api_url, job_id, job_token_id, TASK_NAME):
         return {"status": "skipped", "reason": "job already terminal"}
@@ -247,8 +253,6 @@ def run_mriqc_task(task, **kwargs):
                         },
                     )
                     set_job_cancelled(gc, job_id, TASK_NAME)
-                    from celery.exceptions import Ignore
-
                     raise Ignore()
 
             stdout, stderr = proc.communicate()

@@ -33,8 +33,9 @@ const MriqcTool = {
             name: 'participantLabel',
             label: 'Participant Label',
             type: 'text',
-            default: '001',
-            hint: 'Etichetta BIDS (es. 001). Auto-rilevata dal nome file.',
+            default: '',
+            hint: 'Etichetta BIDS senza prefisso sub- (es. 003). '
+                + 'Lasciare vuoto: rilevata automaticamente da nome file → cartella padre → gerarchia.',
         },
         {
             name: 'modality',

@@ -9,12 +9,13 @@ Struttura:
   lstai.py       – run_lstai_task
 """
 
-from .freesurfer import run_freesurfer_task
+from .freesurfer import run_freesurfer_task, upload_freesurfer_results
 from .lstai import run_lstai_task
 from .mriqc import run_mriqc_task
 
 __all__ = [
     "run_mriqc_task",
     "run_freesurfer_task",
+    "upload_freesurfer_results",
     "run_lstai_task",
 ]

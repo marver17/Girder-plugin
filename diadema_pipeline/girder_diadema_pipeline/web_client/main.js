@@ -3,11 +3,14 @@
  *
  * 1. Estende la Item View di Girder con il pannello DIADEMA
  * 2. Registra il ResultsWidget con il viewer NIfTI
+ * 3. Registra la route di configurazione admin
  */
 
 import events from '@girder/core/events';
 import { wrap } from '@girder/core/utilities/PluginUtils';
 import ItemView from '@girder/core/views/body/ItemView';
+
+import './routes';
 
 import DiademaPanel      from './views/DiademaPanel';
 import DiademaResultsWidget from './views/ResultsWidget';
@@ -31,10 +34,11 @@ function _registerWidget(registry) {
         component: DiademaResultsWidget,
         priority: 15,
         shouldRender: (item) => {
+            const meta = item.get('meta') || {};
             return (
-                item.get('diadema_mriqc_results')      !== undefined ||
-                item.get('diadema_freesurfer_results')  !== undefined ||
-                item.get('diadema_lstai_results')       !== undefined
+                meta.diadema_mriqc_results     !== undefined ||
+                meta.diadema_freesurfer_results !== undefined ||
+                meta.diadema_lstai_results      !== undefined
             );
         },
     });

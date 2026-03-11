@@ -14,10 +14,15 @@ Il BIDS input viene sempre creato in un tmpdir effimero.
 
 import datetime
 import json
+import logging
 import os
 import subprocess
 import tempfile
 from pathlib import Path
+
+from celery.exceptions import Ignore
+
+logger = logging.getLogger(__name__)
 
 from girder_worker.app import app
 from girder_worker.utils import girder_job
@@ -41,8 +46,12 @@ _ENV_MRIQC_OUTPUT_DIR = "DIADEMA_MRIQC_OUTPUT_DIR"
 
 
 @girder_job(title="DIADEMA – MRI QC")
-@app.task(bind=True, acks_late=True, reject_on_worker_lost=True,
-          name="girder_diadema_pipeline.tasks.run_mriqc_task")
+@app.task(
+    bind=True,
+    acks_late=True,
+    reject_on_worker_lost=True,
+    name="girder_diadema_pipeline.tasks.run_mriqc_task",
+)
 def run_mriqc_task(task, **kwargs):
     """
     Esegue MRIQC su un file NIfTI e salva i risultati sull'item Girder.
@@ -69,18 +78,18 @@ def run_mriqc_task(task, **kwargs):
 
     TASK_NAME = "run_mriqc_task"
 
-    item_id           = kwargs.get("item_id")
-    file_id           = kwargs.get("file_id")
-    file_name         = kwargs.get("file_name", "unknown file")
+    item_id = kwargs.get("item_id")
+    file_id = kwargs.get("file_id")
+    file_name = kwargs.get("file_name", "unknown file")
     participant_label = kwargs.get("participant_label", "001")
-    modality          = kwargs.get("modality", "T1w")
-    timeout           = int(kwargs.get("timeout", 1800))
-    output_base_dir   = kwargs.get("output_base_dir")
-    keep_work_dir     = bool(kwargs.get("keep_work_dir", False))
-    job_id            = kwargs.get("job_id")
-    job_token_id      = kwargs.get("job_token_id")
+    modality = kwargs.get("modality", "T1w")
+    timeout = int(kwargs.get("timeout", 1800))
+    output_base_dir = kwargs.get("output_base_dir")
+    keep_work_dir = bool(kwargs.get("keep_work_dir", False))
+    job_id = kwargs.get("job_id")
+    job_token_id = kwargs.get("job_token_id")
 
-    girder_api_url      = resolve_girder_url(task)
+    girder_api_url = resolve_girder_url(task)
     girder_client_token = getattr(task.request, "girder_client_token", None)
 
     gc = GirderClient(apiUrl=girder_api_url)
@@ -91,15 +100,22 @@ def run_mriqc_task(task, **kwargs):
 
     set_running(girder_api_url, job_id, job_token_id, TASK_NAME)
     progress = make_safe_progress(task, TASK_NAME)
-    progress(f"MRIQC: {file_name} ({modality}, sub-{participant_label})", total=100, current=5)
+    progress(
+        f"MRIQC: {file_name} ({modality}, sub-{participant_label})",
+        total=100,
+        current=5,
+    )
 
     # ── Directory di output persistente ──────────────────────────────────────
     item_output_dir = resolve_dir(
-        output_base_dir, _ENV_MRIQC_OUTPUT_DIR, _DEFAULT_MRIQC_OUTPUT_DIR,
-        "output_base_dir", TASK_NAME
+        output_base_dir,
+        _ENV_MRIQC_OUTPUT_DIR,
+        _DEFAULT_MRIQC_OUTPUT_DIR,
+        "output_base_dir",
+        TASK_NAME,
     ) / str(item_id)
     output_dir = item_output_dir / "output"
-    work_dir   = item_output_dir / "work"
+    work_dir = item_output_dir / "work"
     output_dir.mkdir(parents=True, exist_ok=True)
     work_dir.mkdir(parents=True, exist_ok=True)
     # ─────────────────────────────────────────────────────────────────────────
@@ -112,14 +128,19 @@ def run_mriqc_task(task, **kwargs):
         # Download
         progress("Scaricamento file NIfTI...", current=10)
         file_info = gc.get(f"file/{file_id}")
-        filename  = file_info["name"]
+        filename = file_info["name"]
 
-        (input_dir / "dataset_description.json").write_text(json.dumps({
-            "Name": "DIADEMA MRI QC", "BIDSVersion": "1.6.0", "DatasetType": "raw"
-        }))
+        (input_dir / "dataset_description.json").write_text(
+            json.dumps(
+                {"Name": "DIADEMA MRI QC", "BIDSVersion": "1.6.0", "DatasetType": "raw"}
+            )
+        )
 
         if modality == "bold":
-            subdir, bids_filename = "func", f"sub-{participant_label}_task-rest_{modality}.nii.gz"
+            subdir, bids_filename = (
+                "func",
+                f"sub-{participant_label}_task-rest_{modality}.nii.gz",
+            )
         elif modality == "dwi":
             subdir, bids_filename = "dwi", f"sub-{participant_label}_{modality}.nii.gz"
         else:
@@ -134,7 +155,9 @@ def run_mriqc_task(task, **kwargs):
         with open(nifti_path, "rb") as f:
             magic = f.read(2)
         if magic != b"\x1f\x8b":
-            progress(f"File non compresso ({magic!r}), comprimo in-place...", current=15)
+            progress(
+                f"File non compresso ({magic!r}), comprimo in-place...", current=15
+            )
             raw = nifti_path.read_bytes()
             with _gzip.open(nifti_path, "wb") as gz:
                 gz.write(raw)
@@ -143,20 +166,30 @@ def run_mriqc_task(task, **kwargs):
         # Check 3D (MRIQC fallisce su acquisizioni 2D thin-slab)
         img = nib.load(str(nifti_path))
         if img.shape[2] < 10:
-            msg = (f"Acquisizione 2D non supportata da MRIQC: shape={img.shape[:3]}, "
-                   f"solo {img.shape[2]} slice (minimo 10).")
-            update_item_fields(gc, item_id,
+            msg = (
+                f"Acquisizione 2D non supportata da MRIQC: shape={img.shape[:3]}, "
+                f"solo {img.shape[2]} slice (minimo 10)."
+            )
+            update_item_fields(
+                gc,
+                item_id,
                 diadema_mriqc_status="error",
-                diadema_mriqc_error={"message": msg, "timestamp": now_iso()})
+                diadema_mriqc_error={"message": msg, "timestamp": now_iso()},
+            )
             raise Exception(msg)
 
         progress("Avvio MRIQC (potrebbero volerci diversi minuti)...", current=30)
 
         mriqc_cmd = [
-            "mriqc", str(input_dir), str(output_dir), "participant",
-            "--participant-label", participant_label,
+            "mriqc",
+            str(input_dir),
+            str(output_dir),
+            "participant",
+            "--participant-label",
+            participant_label,
             "--no-sub",
-            "-w", str(work_dir),
+            "-w",
+            str(work_dir),
             "--verbose-reports",
         ]
 
@@ -179,35 +212,54 @@ def run_mriqc_task(task, **kwargs):
                     raise subprocess.TimeoutExpired(mriqc_cmd, timeout)
 
                 _cancel_requested = False
-                _cancel_status    = None
+                _cancel_status = None
                 if job_id:
                     try:
                         _cancel_status = gc.get(f"job/{job_id}").get("status")
-                        progress(f"[poll] job status={_cancel_status}", current=_elapsed * 50 // timeout + 30)
+                        progress(
+                            f"[poll] job status={_cancel_status}",
+                            current=_elapsed * 50 // timeout + 30,
+                        )
                         if _cancel_status in (5, 824):  # CANCELLED / CANCELING
                             _cancel_requested = True
                     except Exception as _poll_e:
-                        print(f"[{TASK_NAME}] poll status non-fatal: {_poll_e}")
+                        logger.warning(
+                            "[%s] poll status non-fatal: %s", TASK_NAME, _poll_e
+                        )
 
                 if _cancel_requested:
-                    progress(f"Cancellazione richiesta (status={_cancel_status}), termino MRIQC...", current=50)
+                    progress(
+                        f"Cancellazione richiesta (status={_cancel_status}), termino MRIQC...",
+                        current=50,
+                    )
                     kill_proc(proc, TASK_NAME)
-                    update_item_fields(gc, item_id,
+                    update_item_fields(
+                        gc,
+                        item_id,
                         diadema_mriqc_status="cancelled",
-                        diadema_mriqc_error={"message": "Job cancellato dall'utente", "timestamp": now_iso()})
+                        diadema_mriqc_error={
+                            "message": "Job cancellato dall'utente",
+                            "timestamp": now_iso(),
+                        },
+                    )
                     set_job_cancelled(gc, job_id, TASK_NAME)
                     from celery.exceptions import Ignore
+
                     raise Ignore()
 
             stdout, stderr = proc.communicate()
             if proc.returncode != 0:
-                raise Exception(f"MRIQC fallito (exit {proc.returncode}):\n{stderr[-2000:]}")
+                raise Exception(
+                    f"MRIQC fallito (exit {proc.returncode}):\n{stderr[-2000:]}"
+                )
 
             progress("MRIQC completato, raccolta risultati...", current=80)
 
             # Parse output JSON
             metrics = {}
-            json_files = list(output_dir.glob(f"**/sub-{participant_label}_{modality}.json"))
+            json_files = list(
+                output_dir.glob(f"**/sub-{participant_label}_{modality}.json")
+            )
             if json_files:
                 with open(json_files[0]) as f:
                     metrics = json.load(f)
@@ -225,39 +277,55 @@ def run_mriqc_task(task, **kwargs):
             # Pulizia work dir (opzionale)
             if not keep_work_dir:
                 import shutil
+
                 try:
                     shutil.rmtree(work_dir, ignore_errors=True)
                     work_dir.mkdir(exist_ok=True)
                     progress("Work dir ripulita.", current=95)
                 except Exception as _rm_e:
-                    print(f"[{TASK_NAME}] pulizia work dir non-fatal: {_rm_e}")
+                    logger.warning(
+                        "[%s] pulizia work dir non-fatal: %s", TASK_NAME, _rm_e
+                    )
 
-            update_item_fields(gc, item_id,
+            update_item_fields(
+                gc,
+                item_id,
                 diadema_mriqc_results={
-                    "metrics":           metrics,
-                    "timestamp":         now_iso(),
-                    "mriqc_version":     tool_version("mriqc"),
+                    "metrics": metrics,
+                    "timestamp": now_iso(),
+                    "mriqc_version": tool_version("mriqc"),
                     "participant_label": participant_label,
-                    "modality":          modality,
-                    "file_id":           file_id,
-                    "file_name":         filename,
-                    "output_dir":        str(output_dir),
-                    "reports_uploaded":  uploaded,
+                    "modality": modality,
+                    "file_id": file_id,
+                    "file_name": filename,
+                    "output_dir": str(output_dir),
+                    "reports_uploaded": uploaded,
                 },
                 diadema_mriqc_status="completed",
             )
             progress("Quality control completato!", current=100)
             return {"status": "success", "item_id": item_id, "metrics": metrics}
 
+        except Ignore:
+            raise
+
         except subprocess.TimeoutExpired:
             msg = f"MRIQC timeout dopo {timeout}s"
-            update_item_fields(gc, item_id,
+            logger.error("[%s] %s", TASK_NAME, msg)
+            update_item_fields(
+                gc,
+                item_id,
                 diadema_mriqc_status="error",
-                diadema_mriqc_error={"message": msg, "timestamp": now_iso()})
+                diadema_mriqc_error={"message": msg, "timestamp": now_iso()},
+            )
             raise Exception(msg)
 
         except Exception as exc:
-            update_item_fields(gc, item_id,
+            logger.exception("[%s] Errore non gestito: %s", TASK_NAME, exc)
+            update_item_fields(
+                gc,
+                item_id,
                 diadema_mriqc_status="error",
-                diadema_mriqc_error={"message": str(exc), "timestamp": now_iso()})
+                diadema_mriqc_error={"message": str(exc), "timestamp": now_iso()},
+            )
             raise

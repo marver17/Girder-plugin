@@ -1,6 +1,9 @@
 """Worker entry point per DIADEMA Pipeline."""
 
+import logging
 import os
+
+logger = logging.getLogger(__name__)
 
 
 def _patch_gw_signals():
@@ -39,7 +42,7 @@ def _patch_gw_signals():
                 msg = str(e)
                 terminal = ("Current state is '3'", "Current state is '5'", "Current state is '824'")
                 if not ("Invalid state transition" in msg and any(s in msg for s in terminal)):
-                    print(f"[diadema_pipeline] gw_task_prerun non-fatal: {e}")
+                    logger.warning("[diadema_pipeline] gw_task_prerun non-fatal: %s", e)
 
         task_prerun.connect(patched_prerun, weak=False)
 
@@ -54,11 +57,11 @@ def _patch_gw_signals():
                 msg = str(e)
                 terminal = ("Current state is '5'", "Current state is '824'")
                 if not ("Invalid state transition" in msg and any(s in msg for s in terminal)):
-                    print(f"[diadema_pipeline] gw_task_postrun non-fatal: {e}")
+                    logger.warning("[diadema_pipeline] gw_task_postrun non-fatal: %s", e)
 
         task_postrun.connect(patched_postrun, weak=False)
 
-    print(f"[diadema_pipeline] Segnali patchati: localhost → {correct_netloc}")
+    logger.info("[diadema_pipeline] Segnali patchati: localhost → %s", correct_netloc)
 
 
 class DiademaWorkerPlugin:

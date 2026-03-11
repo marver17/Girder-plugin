@@ -1,10 +1,19 @@
 """
 Helper condivisi tra tutti i task DIADEMA.
+
+Ordine di priorità per resolve_dir:
+  1. Valore esplicito passato come kwarg (può provenire dai Settings Girder)
+  2. Variabile d'ambiente nel container worker
+  3. Default hardcoded
 """
 
 import datetime
+import logging
 import os
 import subprocess
+from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 
 def resolve_girder_url(task):
@@ -31,7 +40,9 @@ def idempotency_guard(girder_api_url, job_id, job_token_id, task_name):
         gc.token = job_token_id
         status = gc.get(f"job/{job_id}").get("status", 0)
         if status in (3, 4, 5):
-            print(f"[{task_name}] Job {job_id} già terminale ({status}), skip re-delivery")
+            print(
+                f"[{task_name}] Job {job_id} già terminale ({status}), skip re-delivery"
+            )
             return True
     except Exception as exc:
         print(f"[{task_name}] idempotency check non-fatal: {exc}")
@@ -52,9 +63,9 @@ def set_running(girder_api_url, job_id, job_token_id, task_name):
         gc = GirderClient(apiUrl=girder_api_url)
         gc.token = job_token_id
         gc.put(f"job/{job_id}", parameters={"status": 2})
-        print(f"[{task_name}] Job {job_id} → RUNNING")
+        logger.info("[%s] Job %s → RUNNING", task_name, job_id)
     except Exception as exc:
-        print(f"[{task_name}] WARNING set RUNNING: {exc}")
+        logger.warning("[%s] set RUNNING fallito: %s", task_name, exc)
 
 
 def make_safe_progress(task, task_name):
@@ -65,8 +76,9 @@ def make_safe_progress(task, task_name):
     - aggiorna la barra di avanzamento (updateProgress)
     Nessuna delle tre operazioni blocca il task se fallisce.
     """
+
     def safe_progress(message, current=None, total=None):
-        print(f"[{task_name}] {message}")
+        logger.debug("[%s] %s", task_name, message)
         try:
             task.job_manager.write(f"{message}\n")
         except Exception:
@@ -89,16 +101,16 @@ def update_item_fields(gc, item_id, **fields):
     try:
         gc.put(f"item/{item_id}/metadata", json=fields)
     except Exception as exc:
-        print(f"[diadema] WARNING update item {item_id}: {exc}")
+        logger.warning("[diadema] update item %s fallito: %s", item_id, exc)
 
 
 def set_job_cancelled(gc, job_id, task_name):
     """Imposta lo stato del job a CANCELLED (5) usando gc (token utente con scope jobs.*)."""
     try:
         gc.put(f"job/{job_id}", parameters={"status": 5})
-        print(f"[{task_name}] Job {job_id} → CANCELLED")
+        logger.info("[%s] Job %s → CANCELLED", task_name, job_id)
     except Exception as exc:
-        print(f"[{task_name}] WARNING set CANCELLED: {exc}")
+        logger.warning("[%s] set CANCELLED fallito: %s", task_name, exc)
 
 
 def kill_proc(proc, task_name):
@@ -113,7 +125,7 @@ def kill_proc(proc, task_name):
         os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
         proc.wait(timeout=30)
     except Exception as exc:
-        print(f"[{task_name}] killpg non-fatal: {exc}")
+        logger.warning("[%s] killpg non-fatal: %s", task_name, exc)
         try:
             proc.kill()
             proc.wait(timeout=10)
@@ -124,7 +136,9 @@ def kill_proc(proc, task_name):
 def tool_version(cmd_name):
     """Legge la versione di un tool CLI (es. 'mriqc', 'recon-all')."""
     try:
-        r = subprocess.run([cmd_name, "--version"], capture_output=True, text=True, timeout=10)
+        r = subprocess.run(
+            [cmd_name, "--version"], capture_output=True, text=True, timeout=10
+        )
         return r.stdout.strip() or r.stderr.strip()
     except Exception:
         return "unknown"
@@ -135,17 +149,18 @@ def now_iso():
     return datetime.datetime.now(datetime.timezone.utc).isoformat()
 
 
-def resolve_dir(kwargs_key, env_var, default, label, task_name):
+def resolve_dir(explicit_path, env_var, default, label, task_name):
     """
-    Ricava il path di una directory nell'ordine:
-    1. kwargs (parametro esplicito dal client)   → massima priorità
-    2. variabile d'ambiente nel container worker
-    3. valore di default hardcoded
+    Ricava il path di una directory nell'ordine di priorità:
+      1. explicit_path  – valore passato come kwarg (può provenire dai Settings Girder
+                          iniettati dal layer REST al momento del dispatch del task)
+      2. variabile d'ambiente nel container worker (env_var)
+      3. valore di default hardcoded
 
-    Crea la directory se non esiste.
+    Crea la directory se non esiste e restituisce un oggetto pathlib.Path.
     """
-    path_str = kwargs_key or os.environ.get(env_var) or default
-    path = __import__("pathlib").Path(path_str)
+    path_str = explicit_path or os.environ.get(env_var) or default
+    path = Path(path_str)
     path.mkdir(parents=True, exist_ok=True)
-    print(f"[{task_name}] {label}: {path}")
+    logger.info("[%s] %s: %s", task_name, label, path)
     return path

@@ -4,6 +4,7 @@ Espone un endpoint generico POST /:id/run/:toolId
 che accetta i parametri del tool e li invia alla coda Celery corretta.
 """
 
+import logging
 import os
 
 from girder.api import access
@@ -13,9 +14,12 @@ from girder.constants import AccessType, TokenScope
 from girder.exceptions import RestException
 from girder.models.file import File
 from girder.models.item import Item
+from girder.models.setting import Setting
 from girder.models.token import Token
 from girder_jobs.constants import JobStatus
 from girder_jobs.models.job import Job
+
+logger = logging.getLogger(__name__)
 
 # Tool supportati → coda Celery + task name (da aggiungere man mano)
 _TOOL_CONFIG = {
@@ -56,6 +60,8 @@ class DiademaResource(Resource):
         self.route("GET",  (":id", "results"),        self.getResults)
         self.route("DELETE", (":id", "results", ":toolId"), self.deleteResults)
         self.route("POST", ("cleanup_stuck_jobs",),   self.cleanupStuckJobs)
+        self.route("GET",  ("settings",),             self.getSettings)
+        self.route("PUT",  ("settings",),             self.updateSettings)
 
     @access.user(scope=TokenScope.DATA_WRITE)
     @autoDescribeRoute(
@@ -100,6 +106,7 @@ class DiademaResource(Resource):
                required=False, dataType="integer", default=14400)
         # Parametri LST-AI
         .param("inputType", "Tipo input (T1+FLAIR, T1 only)", required=False, default="T1+FLAIR")
+        .param("flairFileId", "ID file FLAIR (necessario se inputType=T1+FLAIR)", required=False)
         .param("threshold", "Soglia lesioni (0.0-1.0)", required=False, dataType="float", default=0.5)
         .param("useGpu", "Usa GPU", required=False, dataType="boolean", default=True)
         .errorResponse("Tool non supportato", 400)
@@ -109,9 +116,16 @@ class DiademaResource(Resource):
                 outputBaseDir, keepWorkDir,
                 directive, hemi, openmpThreads, mprage, wsatlas, deface,
                 noIsrunning, extraFlags, subjectsDir, keepSubjectsDir, fsTimeout,
-                inputType, threshold, useGpu, params):
+                inputType, flairFileId, threshold, useGpu, params):
         if toolId not in _TOOL_CONFIG:
             raise RestException(f"Tool non supportato: '{toolId}'. Valori ammessi: {list(_TOOL_CONFIG)}", 400)
+
+        # ── Lettura configurazione dal DB (Settings admin) ────────────────────
+        from .settings import PluginSettings
+        _settings_mriqc_dir  = Setting().get(PluginSettings.MRIQC_OUTPUT_DIR) or None
+        _settings_subjects_dir = Setting().get(PluginSettings.SUBJECTS_DIR) or None
+        _settings_lstai_dir  = Setting().get(PluginSettings.LSTAI_OUTPUT_DIR) or None
+        # ─────────────────────────────────────────────────────────────────────
 
         cfg = _TOOL_CONFIG[toolId]
 
@@ -122,7 +136,8 @@ class DiademaResource(Resource):
                 participant_label = participantLabel,
                 modality          = modality,
                 timeout           = timeout,
-                output_base_dir   = outputBaseDir or None,
+                # Priorità: kwarg esplicito → settings admin → env var → default
+                output_base_dir   = outputBaseDir or _settings_mriqc_dir or None,
                 keep_work_dir     = keepWorkDir,
             )
         elif toolId == "freesurfer":
@@ -137,17 +152,25 @@ class DiademaResource(Resource):
                 deface            = deface,
                 no_isrunning      = noIsrunning,
                 extra_flags       = extraFlags,
-                subjects_dir      = subjectsDir or None,
+                # Priorità: kwarg esplicito → settings admin → env var → default
+                subjects_dir      = subjectsDir or _settings_subjects_dir or None,
                 keep_subjects_dir = keepSubjectsDir,
                 timeout           = fsTimeout,
             )
         else:  # lstai
             from .tasks import run_lstai_task as celery_task
+
+            # Validazione threshold
+            if not (0.0 <= threshold <= 1.0):
+                raise RestException(
+                    f"threshold deve essere nell'intervallo [0.0, 1.0], ricevuto: {threshold}", 400)
             task_kwargs = dict(
                 participant_label = participantLabel,
                 input_type        = inputType,
+                flair_file_id     = flairFileId,
                 threshold         = threshold,
                 use_gpu           = useGpu,
+                output_base_dir   = _settings_lstai_dir or None,
             )
 
         # Trova il file
@@ -247,13 +270,18 @@ class DiademaResource(Resource):
         Description("Marca job DIADEMA bloccati come ERROR")
         .param("dryRun", "Solo mostra senza modificare", dataType="boolean",
                required=False, default=False)
+        .param("limit", "Numero massimo di job da processare",
+               dataType="integer", required=False, default=100)
     )
-    def cleanupStuckJobs(self, dryRun, params):
+    def cleanupStuckJobs(self, dryRun, limit, params):
         job_types = [cfg["job_type"] for cfg in _TOOL_CONFIG.values()]
-        stuck = list(Job().find({
-            "type": {"$in": job_types},
-            "status": {"$in": [JobStatus.QUEUED, JobStatus.RUNNING]},
-        }))
+        stuck = list(Job().find(
+            {
+                "type": {"$in": job_types},
+                "status": {"$in": [JobStatus.QUEUED, JobStatus.RUNNING]},
+            },
+            limit=limit,
+        ))
         if not dryRun:
             for job in stuck:
                 Job().updateJob(job, status=JobStatus.ERROR,
@@ -261,6 +289,59 @@ class DiademaResource(Resource):
         return {
             "dry_run": dryRun,
             "jobs_found": len(stuck),
+            "limit": limit,
             "action": "none" if dryRun else "marked_as_error",
             "jobs": [{"id": str(j["_id"]), "type": j.get("type"), "title": j.get("title")} for j in stuck],
         }
+
+    # ── Settings endpoints ────────────────────────────────────────────────────
+
+    @access.admin
+    @autoDescribeRoute(
+        Description("Restituisce la configurazione corrente del plugin DIADEMA")
+    )
+    def getSettings(self, params):
+        from .settings import PluginSettings
+
+        keys = [
+            PluginSettings.OUTPUT_STORAGE,
+            PluginSettings.MRIQC_OUTPUT_DIR,
+            PluginSettings.SUBJECTS_DIR,
+            PluginSettings.LSTAI_OUTPUT_DIR,
+            PluginSettings.WIDGET_ENABLED,
+            PluginSettings.WIDGET_FIELDS_MRIQC,
+            PluginSettings.WIDGET_FIELDS_FREESURFER,
+        ]
+        return {key: Setting().get(key) for key in keys}
+
+    @access.admin
+    @autoDescribeRoute(
+        Description("Aggiorna uno o più valori di configurazione del plugin DIADEMA")
+        .jsonParam("settings", "Oggetto JSON con coppie {chiave: valore}",
+                   requireObject=True, paramType="body")
+    )
+    def updateSettings(self, settings, params):
+        from .settings import PluginSettings
+
+        allowed_keys = {
+            PluginSettings.OUTPUT_STORAGE,
+            PluginSettings.MRIQC_OUTPUT_DIR,
+            PluginSettings.SUBJECTS_DIR,
+            PluginSettings.LSTAI_OUTPUT_DIR,
+            PluginSettings.WIDGET_ENABLED,
+            PluginSettings.WIDGET_FIELDS_MRIQC,
+            PluginSettings.WIDGET_FIELDS_FREESURFER,
+        }
+        unknown = set(settings.keys()) - allowed_keys
+        if unknown:
+            raise RestException(
+                f"Chiavi non riconosciute: {sorted(unknown)}. "
+                f"Chiavi valide: {sorted(allowed_keys)}", 400
+            )
+        updated = {}
+        for key, value in settings.items():
+            Setting().set(key, value)
+            updated[key] = value
+            logger.info("[diadema_pipeline] Settings aggiornati: %s = %r", key, value)
+        return {"updated": updated}
+

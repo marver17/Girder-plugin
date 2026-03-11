@@ -11,7 +11,7 @@ services:
       - MONGO_INITDB_DATABASE=girder
     restart: unless-stopped
     ports:
-      - "27017:27017"
+      - "127.0.0.1:27017:27017" # solo localhost in produzione
     healthcheck:
       test: ["CMD", "mongo", "--eval", "db.adminCommand('ping')"]
       interval: 10s
@@ -42,11 +42,11 @@ services:
       - girder-dev-net
     restart: unless-stopped
     ports:
-      - "5672:5672" # AMQP protocol
-      - "15672:15672" # Management UI
+      - "127.0.0.1:5672:5672" # solo localhost in produzione
+      - "127.0.0.1:15672:15672" # Management UI: solo localhost
     environment:
-      - RABBITMQ_DEFAULT_USER=girder
-      - RABBITMQ_DEFAULT_PASS=girder
+      - RABBITMQ_DEFAULT_USER=${RABBITMQ_USER:-girder}
+      - RABBITMQ_DEFAULT_PASS=${RABBITMQ_PASS:-girder}
     volumes:
       - rabbitmq_data:/var/lib/rabbitmq
     healthcheck:
@@ -75,8 +75,8 @@ services:
       - GIRDER_MONGO_URI=mongodb://mongodb:27017/girder
       - GIRDER_REDIS_URL=redis://redis:6379
       - GIRDER_NOTIFICATION_REDIS_URL=redis://redis:6379
-      - BROKER_URL=amqp://girder:girder@rabbitmq:5672//
-      - CELERY_BROKER_URL=amqp://girder:girder@rabbitmq:5672//
+      - BROKER_URL=amqp://${RABBITMQ_USER:-girder}:${RABBITMQ_PASS:-girder}@rabbitmq:5672//
+      - CELERY_BROKER_URL=amqp://${RABBITMQ_USER:-girder}:${RABBITMQ_PASS:-girder}@rabbitmq:5672//
       - CELERY_RESULT_BACKEND=mongodb://mongodb:27017/girder
       - PYTHONUNBUFFERED=1
       # URL usato dal server Girder quando costruisce i messaggi Celery per i worker.
@@ -116,7 +116,7 @@ services:
       mongodb:
         condition: service_healthy
     environment:
-      - CELERY_BROKER_URL=amqp://girder:girder@rabbitmq:5672//
+      - CELERY_BROKER_URL=amqp://${RABBITMQ_USER:-girder}:${RABBITMQ_PASS:-girder}@rabbitmq:5672//
       - CELERY_RESULT_BACKEND=mongodb://mongodb:27017/girder
       - PYTHONUNBUFFERED=1
       - C_FORCE_ROOT=1
@@ -141,15 +141,17 @@ services:
       mongodb:
         condition: service_healthy
     environment:
-      - CELERY_BROKER_URL=amqp://girder:girder@rabbitmq:5672//
+      - CELERY_BROKER_URL=amqp://${RABBITMQ_USER:-girder}:${RABBITMQ_PASS:-girder}@rabbitmq:5672//
       - CELERY_RESULT_BACKEND=mongodb://mongodb:27017/girder
       - PYTHONUNBUFFERED=1
       - C_FORCE_ROOT=1
       - GIRDER_API_URL=http://girder:8080/api/v1
       - CELERY_BROKER_HEARTBEAT=0
       - CELERY_WORKER_CANCEL_LONG_RUNNING_TASKS_ON_CONNECTION_LOSS=true
+      - DIADEMA_MRIQC_OUTPUT_DIR=${DIADEMA_MRIQC_OUTPUT_DIR:-/data/diadema/mriqc}
     volumes:
       - ./diadema_pipeline:/opt/diadema_pipeline
+      - diadema_mriqc_data:/data/diadema/mriqc # output persistente
     restart: unless-stopped
 
   # DIADEMA – FreeSurfer worker (freesurfer/freesurfer:8.1.0, coda freesurfer)
@@ -166,7 +168,7 @@ services:
       mongodb:
         condition: service_healthy
     environment:
-      - CELERY_BROKER_URL=amqp://girder:girder@rabbitmq:5672//
+      - CELERY_BROKER_URL=amqp://${RABBITMQ_USER:-girder}:${RABBITMQ_PASS:-girder}@rabbitmq:5672//
       - CELERY_RESULT_BACKEND=mongodb://mongodb:27017/girder
       - PYTHONUNBUFFERED=1
       - C_FORCE_ROOT=1
@@ -174,9 +176,10 @@ services:
       - CELERY_BROKER_HEARTBEAT=0
       - CELERY_WORKER_CANCEL_LONG_RUNNING_TASKS_ON_CONNECTION_LOSS=true
       - FS_LICENSE=/usr/local/freesurfer/license.txt
+      - DIADEMA_SUBJECTS_DIR=${DIADEMA_SUBJECTS_DIR:-/data/diadema/subjects}
     volumes:
       - ./diadema_pipeline:/opt/diadema_pipeline
-      # licenza FreeSurfer baked nell'immagine via COPY nel Dockerfile
+      - diadema_subjects_data:/data/diadema/subjects # output persistente
     restart: unless-stopped
 
 networks:
@@ -193,3 +196,7 @@ volumes:
     name: girder-dev-data
   girder_node_modules:
     name: girder-dev-node-modules
+  diadema_mriqc_data:
+    name: girder-diadema-mriqc-output
+  diadema_subjects_data:
+    name: girder-diadema-subjects

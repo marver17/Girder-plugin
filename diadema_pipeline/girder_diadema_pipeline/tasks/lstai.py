@@ -1,7 +1,20 @@
 """
 Task DIADEMA – LST-AI (lesion segmentation).
-Stub strutturato: guardia idempotency + RUNNING + placeholder implementazione.
+
+Stato: NON IMPLEMENTATO.
+Questo stub gestisce correttamente lo stato Girder (idempotency guard, RUNNING,
+errore applicativo esplicito) senza lanciare eccezioni non gestite.
+
+Per implementare:
+  1. Aggiungere il Dockerfile del worker LST-AI e il servizio in docker-compose.yml
+  2. Installare `lst_ai` nel worker
+  3. Implementare il download del file T1 (e FLAIR opzionale)
+  4. Costruire il comando lst_ai e gestire il subprocess con polling cancel
+  5. Parsare i risultati (lesion_count, total_volume_ml, lesion_mask_file_id)
+  6. Impostare diadema.widget_enabled.lstai = true nelle Settings admin
 """
+
+import logging
 
 from girder_worker.app import app
 from girder_worker.utils import girder_job
@@ -15,6 +28,13 @@ from ._helpers import (
     update_item_fields,
 )
 
+logger = logging.getLogger(__name__)
+
+_NOT_IMPLEMENTED_MSG = (
+    "LST-AI non è ancora disponibile in questa installazione. "
+    "Contattare l'amministratore del sistema."
+)
+
 
 @girder_job(title="DIADEMA – LST-AI")
 @app.task(bind=True, acks_late=True, reject_on_worker_lost=True,
@@ -23,23 +43,22 @@ def run_lstai_task(task, **kwargs):
     """
     Esegue LST-AI su file NIfTI (T1 ± FLAIR) per segmentazione lesioni WM.
 
-    Parametri previsti (da implementare):
-        item_id        (str)   – ID item Girder
-        file_id        (str)   – ID file T1 NIfTI
-        flair_file_id  (str)   – ID file FLAIR (opzionale, se input_type="T1+FLAIR")
-        input_type     (str)   – "T1+FLAIR" | "T1 only"   (default: "T1+FLAIR")
-        threshold      (float) – soglia probabilità lesione 0.0-1.0   (default: 0.5)
-        use_gpu        (bool)  – usa GPU se disponibile   (default: True)
-        output_base_dir(str)   – directory output persistente
-                                 (env: DIADEMA_LSTAI_OUTPUT_DIR, default: /data/diadema/lstai)
-        timeout        (int)   – secondi max   (default: 3600)
-        job_id / job_token_id  – gestione stato Girder
+    Parametri supportati (da implementare nel backend):
+        item_id         (str)   – ID item Girder
+        file_id         (str)   – ID file T1 NIfTI
+        flair_file_id   (str)   – ID file FLAIR (opzionale, richiesto se input_type="T1+FLAIR")
+        input_type      (str)   – "T1+FLAIR" | "T1 only"   (default: "T1+FLAIR")
+        threshold       (float) – soglia probabilità lesione 0.0–1.0   (default: 0.5)
+        use_gpu         (bool)  – usa GPU se disponibile   (default: True)
+        output_base_dir (str)   – directory output persistente
+        timeout         (int)   – secondi max   (default: 3600)
+        job_id / job_token_id   – gestione stato Girder
     """
     from girder_client import GirderClient
 
-    TASK_NAME  = "run_lstai_task"
-    item_id    = kwargs.get("item_id")
-    job_id     = kwargs.get("job_id")
+    TASK_NAME    = "run_lstai_task"
+    item_id      = kwargs.get("item_id")
+    job_id       = kwargs.get("job_id")
     job_token_id = kwargs.get("job_token_id")
 
     girder_api_url      = resolve_girder_url(task)
@@ -53,11 +72,24 @@ def run_lstai_task(task, **kwargs):
 
     set_running(girder_api_url, job_id, job_token_id, TASK_NAME)
     progress = make_safe_progress(task, TASK_NAME)
-    progress("LST-AI: implementazione in corso...", total=100, current=5)
+    progress("LST-AI: tool non ancora implementato in questa installazione.",
+             total=100, current=5)
 
-    # TODO: implementare LST-AI
+    logger.warning("[%s] Tentativo di eseguire un task non implementato (item_id=%s)", TASK_NAME, item_id)
+
     update_item_fields(gc, item_id,
-        diadema_lstai_status="error",
-        diadema_lstai_error={"message": "LST-AI non ancora implementato", "timestamp": now_iso()})
+        diadema_lstai_status="not_implemented",
+        diadema_lstai_error={
+            "message": _NOT_IMPLEMENTED_MSG,
+            "timestamp": now_iso(),
+        },
+    )
 
-    raise NotImplementedError("run_lstai_task: implementazione backend pendente")
+    # Termina il job Girder con stato ERROR per segnalarlo chiaramente nell'UI
+    try:
+        gc.put(f"job/{job_id}", parameters={"status": 4})  # 4 = ERROR
+    except Exception as exc:
+        logger.warning("[%s] set ERROR non-fatal: %s", TASK_NAME, exc)
+
+    return {"status": "not_implemented", "message": _NOT_IMPLEMENTED_MSG}
+

@@ -1,0 +1,223 @@
+# ═══════════════════════════════════════════════════════════════════
+# DIADEMA – Docker Compose testing (simil-produzione)
+# ═══════════════════════════════════════════════════════════════════
+# Avvio: docker compose up -d
+# Prerequisiti:
+#   1. cp .env.example .env  (e personalizza i valori)
+#   2. cd ../../  &&  bash build-frontend.sh  (o manualmente npm run build)
+#   3. cp /path/to/freesurfer_license.txt ./freesurfer_license.txt
+# ═══════════════════════════════════════════════════════════════════
+
+# ── Variabili di build per YAML anchors ─────────────────────────────────────
+x-celery-env: &celery-env
+  CELERY_BROKER_URL: "amqp://${RABBITMQ_USER}:${RABBITMQ_PASS}@rabbitmq:5672//"
+  CELERY_RESULT_BACKEND: "mongodb://mongodb:27017/${MONGO_DB:-girder}"
+  CELERY_BROKER_HEARTBEAT: "0"
+  CELERY_WORKER_CANCEL_LONG_RUNNING_TASKS_ON_CONNECTION_LOSS: "true"
+  PYTHONUNBUFFERED: "1"
+
+x-girder-env: &girder-env
+  <<: *celery-env
+  GIRDER_MONGO_URI: "mongodb://mongodb:27017/${MONGO_DB:-girder}"
+  GIRDER_REDIS_URL: "redis://redis:6379"
+  GIRDER_NOTIFICATION_REDIS_URL: "redis://redis:6379"
+  BROKER_URL: "amqp://${RABBITMQ_USER}:${RABBITMQ_PASS}@rabbitmq:5672//"
+  GIRDER_WORKER_CALLBACK_URL: "http://girder:8080/api/v1"
+  GIRDER_API_URL: "http://girder:8080/api/v1"
+
+x-worker-deps: &worker-deps
+  depends_on:
+    rabbitmq:
+      condition: service_healthy
+    mongodb:
+      condition: service_healthy
+    girder:
+      condition: service_healthy
+
+# ─────────────────────────────────────────────────────────────────────────────
+
+services:
+  # ── Infrastruttura ──────────────────────────────────────────────────────────
+
+  mongodb:
+    image: mongo:4.4
+    container_name: diadema-test-mongodb
+    networks: [diadema-test-net]
+    volumes:
+      - mongodb_data:/data/db
+    environment:
+      MONGO_INITDB_DATABASE: ${MONGO_DB:-girder}
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "mongo", "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  redis:
+    image: redis:7-alpine
+    container_name: diadema-test-redis
+    networks: [diadema-test-net]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+
+  rabbitmq:
+    image: rabbitmq:3-management-alpine
+    container_name: diadema-test-rabbitmq
+    networks: [diadema-test-net]
+    restart: unless-stopped
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASS}
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+    ports:
+      # Management UI: http://localhost:${RABBITMQ_MGMT_PORT:-15672}
+      - "${RABBITMQ_MGMT_PORT:-15672}:15672"
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+
+  # ── Girder server ───────────────────────────────────────────────────────────
+
+  girder:
+    build:
+      context: ../../
+      dockerfile: Dockerfile
+    image: diadema-girder:testing
+    container_name: diadema-test-girder
+    networks: [diadema-test-net]
+    depends_on:
+      mongodb:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    environment:
+      <<: *girder-env
+    volumes:
+      # Codice sorgente plugin (installato in editable mode all'avvio)
+      - ../../:/workspace
+      # Dati persistenti Girder (upload, cache pip packages)
+      - girder_data:/home/girder/.local
+    ports:
+      - "${GIRDER_PORT:-8080}:8080"
+    entrypoint: ["/sbin/tini", "--"]
+    command: ["bash", "/workspace/deploy/testing/entrypoint-girder.sh", "serve"]
+    user: girder
+    restart: unless-stopped
+    healthcheck:
+      test:
+        ["CMD", "curl", "-fs", "http://localhost:8080/api/v1/system/version"]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 90s
+
+  # ── Celery worker – coda 'celery' (job generici Girder Worker) ─────────────
+
+  celery-worker:
+    image: diadema-girder:testing
+    container_name: diadema-test-celery-worker
+    networks: [diadema-test-net]
+    <<: *worker-deps
+    environment:
+      <<: *girder-env
+    volumes:
+      - ../../:/workspace
+      - girder_data:/home/girder/.local
+    entrypoint: ["/sbin/tini", "--"]
+    command:
+      ["bash", "/workspace/deploy/testing/entrypoint-girder.sh", "worker"]
+    user: girder
+    restart: unless-stopped
+
+  # ── MRIQC worker – coda 'mriqc' (plugin nifti_qc) ─────────────────────────
+
+  mriqc-worker:
+    build:
+      context: ../../
+      dockerfile: mriqc-worker/Dockerfile
+    image: diadema-mriqc-worker:testing
+    container_name: diadema-test-mriqc-worker
+    networks: [diadema-test-net]
+    <<: *worker-deps
+    environment:
+      <<: *celery-env
+      C_FORCE_ROOT: "1"
+      GIRDER_API_URL: "http://girder:8080/api/v1"
+    volumes:
+      - ../../nifti_qc:/opt/nifti_qc
+    restart: unless-stopped
+
+  # ── DIADEMA MRIQC worker – coda 'diadema_mriqc' ───────────────────────────
+
+  diadema-mriqc-worker:
+    build:
+      context: ../../
+      dockerfile: diadema-mriqc-worker/Dockerfile
+    image: diadema-diadema-mriqc-worker:testing
+    container_name: diadema-test-diadema-mriqc-worker
+    networks: [diadema-test-net]
+    <<: *worker-deps
+    environment:
+      <<: *celery-env
+      C_FORCE_ROOT: "1"
+      GIRDER_API_URL: "http://girder:8080/api/v1"
+      DIADEMA_MRIQC_OUTPUT_DIR: /data/diadema/mriqc
+    volumes:
+      - ../../diadema_pipeline:/opt/diadema_pipeline
+      - diadema_mriqc_data:/data/diadema/mriqc
+    restart: unless-stopped
+
+  # ── FreeSurfer worker – coda 'freesurfer' ─────────────────────────────────
+
+  diadema-freesurfer-worker:
+    build:
+      context: ../../
+      dockerfile: freesurfer-worker/Dockerfile
+    image: diadema-freesurfer-worker:testing
+    container_name: diadema-test-freesurfer-worker
+    networks: [diadema-test-net]
+    <<: *worker-deps
+    environment:
+      <<: *celery-env
+      C_FORCE_ROOT: "1"
+      GIRDER_API_URL: "http://girder:8080/api/v1"
+      FS_LICENSE: /usr/local/freesurfer/license.txt
+      DIADEMA_SUBJECTS_DIR: /data/diadema/subjects
+    volumes:
+      - ../../diadema_pipeline:/opt/diadema_pipeline
+      - diadema_subjects_data:/data/diadema/subjects
+      # Licenza FreeSurfer dall'host (percorso configurato in .env)
+      - ${FREESURFER_LICENSE_PATH:-./freesurfer_license.txt}:/usr/local/freesurfer/license.txt:ro
+    restart: unless-stopped
+
+# ─────────────────────────────────────────────────────────────────────────────
+
+networks:
+  diadema-test-net:
+    driver: bridge
+    name: diadema-test-network
+
+volumes:
+  mongodb_data:
+    name: diadema-test-mongodb
+  rabbitmq_data:
+    name: diadema-test-rabbitmq
+  girder_data:
+    name: diadema-test-girder-data
+  diadema_mriqc_data:
+    name: diadema-test-mriqc-output
+  diadema_subjects_data:
+    name: diadema-test-freesurfer-subjects

@@ -226,6 +226,22 @@ const DiademaPanel = {
             return DiademaPanel._buildParamFieldHTML(param, value);
         }).join('');
 
+        // Banner preview percorso derivatives (solo MRIQC)
+        const derivativesPreview = (tool.id === 'mriqc') ? `
+            <div class="g-diadema-derivatives-preview" style="
+                margin-top: 12px; padding: 8px 10px; border-radius: 4px;
+                background: #f0f4fa; border: 1px solid #c5d6ee; font-size: 11px;">
+                <div style="font-weight: 600; color: #3a6ea5; margin-bottom: 4px;">
+                    <i class="icon-folder"></i> Output derivatives BIDS
+                </div>
+                <div class="g-deriv-path-text" style="color: #555; word-break: break-all;">
+                    <i class="icon-spin3 animate-spin"></i> Calcolo percorso…
+                </div>
+                <div class="g-deriv-warning" style="color: #a05000; margin-top: 4px; display: none;">
+                    <i class="icon-warning"></i> <span></span>
+                </div>
+            </div>` : '';
+
         $form.html(`
             <div style="padding-bottom: 4px; margin-bottom: 10px; border-bottom: 1px solid #eee;">
                 <strong style="font-size: 13px; color: #555;">
@@ -236,7 +252,60 @@ const DiademaPanel = {
             <div class="form-horizontal" style="font-size: 13px;">
                 ${fields}
             </div>
+            ${derivativesPreview}
         `);
+
+        // Preview iniziale e aggiornamento live su modifica del campo
+        if (tool.id === 'mriqc') {
+            DiademaPanel._refreshDerivativesPreview(itemView, $form, '');
+
+            $form.on('input change', '[data-param="derivativesRootId"]', function () {
+                DiademaPanel._refreshDerivativesPreview(itemView, $form, $(this).val().trim());
+            });
+        }
+    },
+
+    _refreshDerivativesPreview(itemView, $form, overrideId) {
+        const itemId = itemView.model.id;
+        const $pathText = $form.find('.g-deriv-path-text');
+        const $warning  = $form.find('.g-deriv-warning');
+
+        $pathText.html('<i class="icon-spin3 animate-spin"></i> Calcolo percorso…');
+        $warning.hide();
+
+        const data = {};
+        if (overrideId) data.overrideId = overrideId;
+
+        restRequest({
+            method: 'GET',
+            url: `diadema_pipeline/${itemId}/derivatives_root`,
+            data,
+            error: null,
+        }).then((resp) => {
+            if (!resp.resolved) {
+                $pathText.html(`<span style="color:#c00;"><i class="icon-cancel"></i> ${resp.error || 'Errore'}</span>`);
+                return;
+            }
+            const sourceLabel = resp.source === 'override'
+                ? '<span style="color:#2a7a2a;">[override]</span>'
+                : resp.source === 'fallback_collection'
+                    ? '<span style="color:#a05000;">[fallback collection]</span>'
+                    : '<span style="color:#2a5a99;">[auto]</span>';
+            $pathText.html(`
+                ${sourceLabel}
+                <code style="font-size: 11px; background: none; padding: 0; color: #2a5a99;">
+                    ${resp.derivatives_path}
+                </code>
+            `);
+            if (resp.warning) {
+                $warning.find('span').text(resp.warning);
+                $warning.show();
+            } else {
+                $warning.hide();
+            }
+        }).catch(() => {
+            $pathText.html('<span style="color:#999;">Anteprima non disponibile</span>');
+        });
     },
 
     _buildParamFieldHTML(param, currentValue) {

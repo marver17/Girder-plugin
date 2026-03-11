@@ -13,6 +13,7 @@ from girder.api.rest import Resource, filtermodel, getApiUrl
 from girder.constants import AccessType, TokenScope
 from girder.exceptions import RestException
 from girder.models.file import File
+from girder.models.folder import Folder
 from girder.models.item import Item
 from girder.models.setting import Setting
 from girder.models.token import Token
@@ -59,6 +60,7 @@ class DiademaResource(Resource):
         self.route("POST", (":id", "run", ":toolId"), self.runTool)
         self.route("PUT", (":id", "processing", ":toolId"), self.updateProcessing)
         self.route("GET", (":id", "results"), self.getResults)
+        self.route("GET", (":id", "derivatives_root"), self.resolveDerivativesRoot)
         self.route("DELETE", (":id", "results", ":toolId"), self.deleteResults)
         self.route("POST", ("cleanup_stuck_jobs",), self.cleanupStuckJobs)
         self.route("GET", ("settings",), self.getSettings)
@@ -202,6 +204,13 @@ class DiademaResource(Resource):
         )
         .param("useGpu", "Usa GPU", required=False, dataType="boolean", default=True)
         .param(
+            "derivativesRootId",
+            "ID folder Girder da usare come radice del dataset BIDS per i derivatives "
+            "(lascia vuoto per stima automatica: risale la gerarchia cercando dataset_description.json)",
+            required=False,
+            default="",
+        )
+        .param(
             "force",
             "Forza riesecuzione anche se il tool è già in corso o completato",
             required=False,
@@ -237,6 +246,7 @@ class DiademaResource(Resource):
         flairFileId,
         threshold,
         useGpu,
+        derivativesRootId,
         force,
         params,
     ):
@@ -278,6 +288,7 @@ class DiademaResource(Resource):
                 # Priorità: kwarg esplicito → settings admin → env var → default
                 output_base_dir=outputBaseDir or _settings_mriqc_dir or None,
                 keep_work_dir=keepWorkDir,
+                derivatives_root_id=derivativesRootId or None,
             )
         elif toolId == "freesurfer":
             from .tasks import run_freesurfer_task as celery_task
@@ -399,6 +410,131 @@ class DiademaResource(Resource):
             "item_id": str(item["_id"]),
             "tool": toolId,
             "status": "queued",
+        }
+
+    @access.user(scope=TokenScope.DATA_READ)
+    @autoDescribeRoute(
+        Description(
+            "Stima la cartella radice del dataset BIDS per i derivatives di un item. "
+            "Risale la gerarchia cercando dataset_description.json; fallback alla collection."
+        )
+        .modelParam("id", model=Item, level=AccessType.READ, destName="item")
+        .param(
+            "overrideId",
+            "ID folder da usare come radice (override, opzionale)",
+            required=False,
+            default="",
+        )
+    )
+    def resolveDerivativesRoot(self, item, overrideId, params):
+        """Restituisce il path breadcrumb della radice BIDS stimata (o dell'override)."""
+
+        def _folder_path(folder_id):
+            """Costruisce il breadcrumb folder/sottofolder/../nome."""
+            parts = []
+            fid = folder_id
+            for _ in range(15):
+                try:
+                    f = Folder().load(fid, force=True)
+                    if not f:
+                        break
+                    parts.append(f["name"])
+                    parent_type = f.get("parentCollection", "folder")
+                    fid = str(f.get("parentId", ""))
+                    if parent_type == "collection" or not fid:
+                        # aggiungi il nome collection
+                        from girder.models.collection import Collection
+
+                        try:
+                            col = Collection().load(f.get("parentId"), force=True)
+                            if col:
+                                parts.append(col["name"])
+                        except Exception:
+                            pass
+                        break
+                except Exception:
+                    break
+            parts.reverse()
+            return " / ".join(parts) if parts else "(root)"
+
+        if overrideId:
+            # Verifica che la folder esista e restituisce il suo path
+            try:
+                folder = Folder().load(overrideId, force=True)
+                if not folder:
+                    return {"error": "Folder non trovata", "resolved": False}
+                path = _folder_path(overrideId)
+                return {
+                    "resolved": True,
+                    "root_id": overrideId,
+                    "root_type": "folder",
+                    "breadcrumb": path,
+                    "derivatives_path": f"{path} / derivatives / mriqc / sub-xxx / anat",
+                    "source": "override",
+                }
+            except Exception as exc:
+                return {"error": str(exc), "resolved": False}
+
+        # Stima automatica: risale la gerarchia
+        folder_id = str(item.get("folderId", ""))
+        if not folder_id:
+            return {"resolved": False, "error": "Item senza folderId"}
+
+        current_id = folder_id
+        for _ in range(10):
+            # Cerca dataset_description.json nella folder corrente
+            desc = list(
+                Item().find(
+                    {
+                        "folderId": Folder().load(current_id, force=True)["_id"],
+                        "name": "dataset_description.json",
+                    },
+                    limit=1,
+                )
+            )
+            if desc:
+                path = _folder_path(current_id)
+                return {
+                    "resolved": True,
+                    "root_id": current_id,
+                    "root_type": "folder",
+                    "breadcrumb": path,
+                    "derivatives_path": f"{path} / derivatives / mriqc / sub-xxx / anat",
+                    "source": "auto",
+                }
+            f = Folder().load(current_id, force=True)
+            if not f:
+                break
+            parent_type = f.get("parentCollection", "folder")
+            parent_id = str(f.get("parentId", ""))
+            if not parent_id or parent_type == "collection":
+                # Fallback: radice collection
+                from girder.models.collection import Collection
+
+                try:
+                    col = Collection().load(f.get("parentId"), force=True)
+                    col_name = col["name"] if col else "collection"
+                    folder_path = _folder_path(folder_id)
+                    return {
+                        "resolved": True,
+                        "root_id": parent_id,
+                        "root_type": "collection",
+                        "breadcrumb": col_name,
+                        "derivatives_path": f"{col_name} / derivatives / mriqc / sub-xxx / anat",
+                        "source": "fallback_collection",
+                        "warning": (
+                            "dataset_description.json non trovato nella gerarchia. "
+                            "I derivatives verranno salvati nella radice della collection. "
+                            "Considera di specificare manualmente il Dataset root ID."
+                        ),
+                    }
+                except Exception:
+                    break
+            current_id = parent_id
+
+        return {
+            "resolved": False,
+            "error": "Impossibile determinare la radice del dataset",
         }
 
     @access.public(scope=TokenScope.DATA_READ)

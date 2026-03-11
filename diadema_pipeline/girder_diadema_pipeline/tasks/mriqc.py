@@ -28,6 +28,7 @@ from girder_worker.app import app
 from girder_worker.utils import girder_job
 
 from ._helpers import (
+    bids_upload_derivative,
     idempotency_guard,
     kill_proc,
     make_safe_progress,
@@ -66,6 +67,8 @@ def run_mriqc_task(task, **kwargs):
         output_base_dir  (str)  – directory radice output persistente
                                   (default: $DIADEMA_MRIQC_OUTPUT_DIR o /data/diadema/mriqc)
         keep_work_dir    (bool) – conserva i file di lavoro MRIQC, default False
+        derivatives_root_id (str) – ID folder Girder da usare come radice dataset BIDS
+                                    (override della stima automatica)
         job_id           (str)  – ID job Girder (idempotency + cancel)
         job_token_id     (str)  – token job (scrittura stato)
     """
@@ -86,6 +89,7 @@ def run_mriqc_task(task, **kwargs):
     timeout = int(kwargs.get("timeout", 1800))
     output_base_dir = kwargs.get("output_base_dir")
     keep_work_dir = bool(kwargs.get("keep_work_dir", False))
+    derivatives_root_id = kwargs.get("derivatives_root_id") or None
     job_id = kwargs.get("job_id")
     job_token_id = kwargs.get("job_token_id")
 
@@ -264,15 +268,45 @@ def run_mriqc_task(task, **kwargs):
                 with open(json_files[0]) as f:
                     metrics = json.load(f)
 
-            # Upload HTML + JSON su Girder
-            progress("Upload risultati su Girder...", current=90)
+            # Upload HTML + JSON su Girder come BIDS derivatives
+            progress("Upload risultati su Girder (BIDS derivatives)...", current=90)
             uploaded = []
+            derivative_item_ids = []
+
+            # datatype BIDS: anat per T1w/T2w, func per bold, dwi per dwi
+            if modality == "bold":
+                bids_datatype = "func"
+            elif modality == "dwi":
+                bids_datatype = "dwi"
+            else:
+                bids_datatype = "anat"
+
             for html_file in output_dir.glob("**/*.html"):
-                gc.uploadFileToItem(item_id, str(html_file))
+                item_id_deriv = bids_upload_derivative(
+                    gc,
+                    item_id,
+                    html_file,
+                    datatype=bids_datatype,
+                    participant_label=participant_label,
+                    derivatives_root_id=derivatives_root_id,
+                    pipeline_name="mriqc",
+                )
                 uploaded.append(html_file.name)
+                if item_id_deriv:
+                    derivative_item_ids.append(item_id_deriv)
             for jf in json_files:
-                gc.uploadFileToItem(item_id, str(jf))
+                item_id_deriv = bids_upload_derivative(
+                    gc,
+                    item_id,
+                    jf,
+                    datatype=bids_datatype,
+                    participant_label=participant_label,
+                    derivatives_root_id=derivatives_root_id,
+                    pipeline_name="mriqc",
+                )
                 uploaded.append(jf.name)
+                if item_id_deriv:
+                    derivative_item_ids.append(item_id_deriv)
 
             # Pulizia work dir (opzionale)
             if not keep_work_dir:
@@ -301,6 +335,7 @@ def run_mriqc_task(task, **kwargs):
                     "file_name": filename,
                     "output_dir": str(output_dir),
                     "reports_uploaded": uploaded,
+                    "derivative_item_ids": derivative_item_ids,
                 },
                 status="completed",
             )

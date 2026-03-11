@@ -58,6 +58,15 @@ const MriqcTool = {
             max: 7200,
             hint: 'MRIQC impiega tipicamente 5-30 min. Default: 30 min.',
         },
+        {
+            name: 'derivativesRootId',
+            label: 'Dataset root (ID folder)',
+            type: 'text',
+            default: '',
+            hint: 'ID Girder della folder radice del dataset BIDS (es. 64a1b2c3...). '
+                + 'Lascia vuoto per stima automatica: risale la gerarchia cercando '
+                + 'dataset_description.json.',
+        },
     ],
 };
 

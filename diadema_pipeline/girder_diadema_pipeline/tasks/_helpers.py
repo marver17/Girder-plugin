@@ -184,3 +184,179 @@ def resolve_dir(explicit_path, env_var, default, label, task_name):
     path.mkdir(parents=True, exist_ok=True)
     logger.info("[%s] %s: %s", task_name, label, path)
     return path
+
+
+# ── Helper BIDS derivatives ───────────────────────────────────────────────────
+
+
+def bids_get_or_create_folder(gc, parent_id, parent_type, name):
+    """Restituisce l'ID di una Girder folder con `name` sotto `parent`, creandola se assente."""
+    existing = gc.get(
+        "folder",
+        parameters={
+            "parentType": parent_type,
+            "parentId": parent_id,
+            "name": name,
+            "limit": 1,
+        },
+    )
+    if existing:
+        return str(existing[0]["_id"])
+    new_folder = gc.post(
+        "folder",
+        parameters={"parentType": parent_type, "parentId": parent_id, "name": name},
+    )
+    return str(new_folder["_id"])
+
+
+def bids_find_dataset_root(gc, item_id):
+    """
+    Stima la radice del dataset BIDS risalendo la gerarchia di folder a partire dall'item.
+
+    Strategia:
+     - Ad ogni livello cerca un item chiamato 'dataset_description.json' nella folder corrente.
+     - Se lo trova, quella folder è la radice del dataset.
+     - Se raggiunge il livello collection senza trovarlo, ritorna (collection_id, 'collection').
+
+    Returns:
+        (root_id: str, root_type: str)  dove root_type è 'folder' o 'collection'
+    """
+    try:
+        item_doc = gc.get(f"item/{item_id}")
+        folder_id = item_doc.get("folderId")
+        if not folder_id:
+            return (str(item_doc.get("collectionId", item_doc["_id"])), "collection")
+
+        current_id = str(folder_id)
+        current_type = "folder"
+
+        # Risali al massimo 10 livelli per evitare loop infiniti
+        for _ in range(10):
+            # Controlla se c'è dataset_description.json in questa folder
+            desc_items = gc.get(
+                "item",
+                parameters={
+                    "folderId": current_id,
+                    "name": "dataset_description.json",
+                    "limit": 1,
+                },
+            )
+            if desc_items:
+                logger.info("[bids] Dataset root trovato: folder %s", current_id)
+                return (current_id, "folder")
+
+            # Risali al parent
+            folder_doc = gc.get(f"folder/{current_id}")
+            parent_type = folder_doc.get("parentCollection", "folder")
+            parent_id = str(folder_doc.get("parentId", ""))
+
+            if not parent_id:
+                break
+
+            if parent_type == "collection":
+                logger.info("[bids] Dataset root: collection %s (fallback)", parent_id)
+                return (parent_id, "collection")
+
+            current_id = parent_id
+            current_type = "folder"
+
+        # Fallback: usa la folder padre diretta dell'item
+        logger.warning("[bids] Dataset root non trovato, uso folder padre dell'item")
+        return (str(folder_id), "folder")
+
+    except Exception as exc:
+        logger.warning("[bids] bids_find_dataset_root fallito: %s", exc)
+        return (None, None)
+
+
+def bids_upload_derivative(
+    gc,
+    item_id,
+    file_path,
+    datatype,
+    participant_label,
+    derivatives_root_id=None,
+    derivatives_root_type=None,
+    pipeline_name="mriqc",
+    overwrite=True,
+):
+    """
+    Uploada un file nella struttura BIDS derivatives di Girder:
+        <dataset_root>/derivatives/<pipeline_name>/sub-<label>/<datatype>/<filename>
+
+    Se derivatives_root_id è None, chiama bids_find_dataset_root per stimarlo.
+    Se overwrite=True e l'item esiste già, sovrascrive i file.
+
+    Returns:
+        str: Girder item ID dell'item derivato, oppure None in caso di errore.
+    """
+    from pathlib import Path as _Path
+
+    try:
+        fpath = _Path(file_path)
+
+        # Radice dataset
+        if not derivatives_root_id:
+            derivatives_root_id, derivatives_root_type = bids_find_dataset_root(
+                gc, item_id
+            )
+
+        if not derivatives_root_id:
+            logger.warning(
+                "[bids] Impossibile determinare dataset root, skip upload derivato %s",
+                fpath.name,
+            )
+            return None
+
+        root_type = derivatives_root_type or "folder"
+
+        # Costruisce la gerarchia: derivatives / pipeline / sub-xxx / datatype
+        deriv_id = bids_get_or_create_folder(
+            gc, derivatives_root_id, root_type, "derivatives"
+        )
+        pipe_id = bids_get_or_create_folder(gc, deriv_id, "folder", pipeline_name)
+        sub_id = bids_get_or_create_folder(
+            gc, pipe_id, "folder", f"sub-{participant_label}"
+        )
+        dtype_id = bids_get_or_create_folder(gc, sub_id, "folder", datatype)
+
+        fname = fpath.name
+
+        # Cerca item esistente con lo stesso nome
+        existing_items = gc.get(
+            "item",
+            parameters={"folderId": dtype_id, "name": fname, "limit": 1},
+        )
+
+        if existing_items and overwrite:
+            target_item_id = str(existing_items[0]["_id"])
+            # Cancella i file esistenti sull'item prima di ricaricare
+            old_files = gc.get(f"item/{target_item_id}/files", parameters={"limit": 50})
+            for of in old_files:
+                try:
+                    gc.delete(f"file/{of['_id']}")
+                except Exception:
+                    pass
+            logger.info("[bids] Sovrascrittura %s (item %s)", fname, target_item_id)
+        elif existing_items:
+            target_item_id = str(existing_items[0]["_id"])
+            logger.info("[bids] Item esistente, skip (overwrite=False): %s", fname)
+            return target_item_id
+        else:
+            # Crea nuovo item nella folder
+            new_item = gc.post(
+                "item",
+                parameters={"folderId": dtype_id, "name": fname},
+            )
+            target_item_id = str(new_item["_id"])
+            logger.info("[bids] Nuovo item derivato %s", fname)
+
+        gc.uploadFileToItem(target_item_id, str(fpath))
+        logger.info("[bids] Upload completato: %s → item %s", fname, target_item_id)
+        return target_item_id
+
+    except Exception as exc:
+        logger.warning(
+            "[bids] bids_upload_derivative fallito per %s: %s", file_path, exc
+        )
+        return None

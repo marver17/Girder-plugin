@@ -60,6 +60,8 @@ class DiademaResource(Resource):
 
         self.route("POST", (":id", "run", ":toolId"), self.runTool)
         self.route("POST", (":id", "cancel", ":toolId"), self.cancelJob)
+        self.route("POST", (":id", "reset", ":toolId"), self.resetJob)
+        self.route("POST", ("job", ":jobId", "force_cancelled"), self.forceJobCancelled)
         self.route("PUT", (":id", "processing", ":toolId"), self.updateProcessing)
         self.route("GET", (":id", "results"), self.getResults)
         self.route("GET", (":id", "derivatives_root"), self.resolveDerivativesRoot)
@@ -622,6 +624,82 @@ class DiademaResource(Resource):
 
     @access.user(scope=TokenScope.DATA_WRITE)
     @autoDescribeRoute(
+        Description(
+            "Forza lo stato di un job DIADEMA a CANCELLED (5), "
+            "bypassa la validazione delle transizioni di stato di Girder. "
+            "Usato dai worker quando la transizione CANCELING(824)→CANCELLED(5) "
+            "viene rifiutata dalla normale API."
+        ).param("jobId", "ID del job Girder", paramType="path")
+    )
+    def forceJobCancelled(self, jobId, params):
+        from bson import ObjectId
+
+        try:
+            oid = ObjectId(jobId)
+        except Exception:
+            raise RestException(f"jobId non valido: {jobId}", 400)
+
+        job = Job().load(oid, force=True)
+        if not job:
+            raise RestException(f"Job {jobId} non trovato", 404)
+
+        # Aggiornamento diretto MongoDB — bypassa la validazione delle transizioni
+        Job().update(
+            {"_id": oid},
+            {
+                "$set": {
+                    "status": 5,
+                    "updated": __import__("datetime").datetime.utcnow(),
+                }
+            },
+            multi=False,
+        )
+        return {"forced": True, "job_id": jobId, "status": 5}
+
+    @access.user(scope=TokenScope.DATA_WRITE)
+    @autoDescribeRoute(
+        Description(
+            "Resetta forzatamente un tool DIADEMA bloccato (es. stuck in cancelling). "
+            "Imposta job a CANCELLED (direct MongoDB) e item.diadema a 'cancelled'."
+        )
+        .modelParam("id", model=Item, level=AccessType.WRITE, destName="item")
+        .param("toolId", "Tool: mriqc | freesurfer | lstai", paramType="path")
+    )
+    def resetJob(self, item, toolId, params):
+        if toolId not in _TOOL_CONFIG:
+            raise RestException(f"Tool non supportato: {toolId}", 400)
+
+        diadema = item.get("diadema") or {}
+        tool_data = diadema.get(toolId) or {}
+        job_id = tool_data.get("job_id")
+
+        # Forza il job a CANCELLED (5) via update diretto, bypass validazione Girder
+        if job_id:
+            import datetime
+
+            from bson import ObjectId
+
+            try:
+                Job().update(
+                    {"_id": ObjectId(job_id)},
+                    {"$set": {"status": 5, "updated": datetime.datetime.utcnow()}},
+                    multi=False,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "resetJob: force-cancel job %s non-fatal: %s", job_id, exc
+                )
+
+        # Aggiorna item.diadema
+        Item().update(
+            {"_id": item["_id"]},
+            {"$set": {f"diadema.{toolId}.status": "cancelled"}},
+            multi=False,
+        )
+        return {"reset": True, "tool": toolId, "job_id": job_id}
+
+    @access.user(scope=TokenScope.DATA_WRITE)
+    @autoDescribeRoute(
         Description("Cancella un job DIADEMA in corso")
         .modelParam("id", model=Item, level=AccessType.WRITE, destName="item")
         .param("toolId", "Tool: mriqc | freesurfer | lstai", paramType="path")
@@ -718,22 +796,32 @@ class DiademaResource(Resource):
         )
     )
     def cleanupStuckJobs(self, dryRun, limit, params):
+        import datetime
+
         job_types = [cfg["job_type"] for cfg in _TOOL_CONFIG.values()]
+        # Stadi "attivi" + CANCELING (824)
+        stuck_statuses = [JobStatus.QUEUED, JobStatus.RUNNING, 824]
         stuck = list(
             Job().find(
                 {
                     "type": {"$in": job_types},
-                    "status": {"$in": [JobStatus.QUEUED, JobStatus.RUNNING]},
+                    "status": {"$in": stuck_statuses},
                 },
                 limit=limit,
             )
         )
         if not dryRun:
             for job in stuck:
-                Job().updateJob(
-                    job,
-                    status=JobStatus.ERROR,
-                    log="[diadema_pipeline] cleanup_stuck_jobs",
+                # Usa update diretto MongoDB per evitare errori di transizione di stato
+                Job().update(
+                    {"_id": job["_id"]},
+                    {
+                        "$set": {
+                            "status": JobStatus.ERROR,
+                            "updated": datetime.datetime.utcnow(),
+                        }
+                    },
+                    multi=False,
                 )
         return {
             "dry_run": dryRun,
@@ -801,5 +889,6 @@ class DiademaResource(Resource):
             Setting().set(key, value)
             updated[key] = value
             logger.info("[diadema_pipeline] Settings aggiornati: %s = %r", key, value)
+        return {"updated": updated}
         return {"updated": updated}
         return {"updated": updated}

@@ -94,17 +94,21 @@ const DiademaPanel = {
         const { status } = DiademaPanel._getToolMeta(itemView.model, tool);
         const $btn = $panel.find('.g-diadema-run-btn');
         const $cancelBtn = $panel.find('.g-diadema-cancel-btn');
+        const $resetBtn = $panel.find('.g-diadema-reset-btn');
         if (ACTIVE.includes(status)) {
             $btn.prop('disabled', true).html('<i class="icon-spin3 animate-spin"></i> In corso…');
-            if (CANCELLABLE.includes(status)) {
-                $cancelBtn.show().prop('disabled', false).html('<i class="icon-cancel"></i> Cancel');
+            if (status === 'cancelling') {
+                $cancelBtn.hide();
+                $resetBtn.show().prop('disabled', false);
             } else {
-                // cancelling in corso
-                $cancelBtn.show().prop('disabled', true).html('<i class="icon-spin3 animate-spin"></i> Cancelling…');
+                $cancelBtn.show().prop('disabled', CANCELLABLE.includes(status) ? false : true)
+                    .html('<i class="icon-cancel"></i> Cancel');
+                $resetBtn.hide();
             }
         } else {
             $btn.prop('disabled', false).html('<i class="icon-play"></i> Run');
             $cancelBtn.hide();
+            $resetBtn.hide();
         }
     },
 
@@ -131,6 +135,9 @@ const DiademaPanel = {
                     </button>
                     <button class="btn btn-sm btn-danger g-diadema-cancel-btn" style="min-width: 80px; display: none;">
                         <i class="icon-cancel"></i> Cancel
+                    </button>
+                    <button class="btn btn-sm btn-warning g-diadema-reset-btn" style="min-width: 80px; display: none;" title="Forza reset (sblocca job cancelling stuck)">
+                        <i class="icon-cw"></i> Force reset
                     </button>
                     <button class="btn btn-sm btn-default g-diadema-advanced-btn" title="Mostra/nascondi parametri avanzati">
                         <i class="icon-cog"></i> Advanced <span class="g-diadema-chevron">▾</span>
@@ -220,6 +227,11 @@ const DiademaPanel = {
         // Cancel
         $panel.find('.g-diadema-cancel-btn').on('click', () => {
             DiademaPanel._onCancel(itemView, $panel);
+        });
+
+        // Force reset (stuck cancelling)
+        $panel.find('.g-diadema-reset-btn').on('click', () => {
+            DiademaPanel._onForceReset(itemView, $panel);
         });
     },
 
@@ -518,6 +530,43 @@ const DiademaPanel = {
         if (!modality) modality = 'T1w';
 
         return { participantLabel, modality };
+    },
+
+    _onForceReset(itemView, $panel) {
+        const tool = DiademaPanel._getSelectedTool($panel);
+        const itemId = itemView.model.id;
+
+        // eslint-disable-next-line no-alert
+        if (!window.confirm(`Forza il reset di ${tool.label}? Il job verrà marcato come cancellato.`)) return;
+
+        const $resetBtn = $panel.find('.g-diadema-reset-btn');
+        $resetBtn.prop('disabled', true).html('<i class="icon-spin3 animate-spin"></i>…');
+
+        restRequest({
+            method: 'POST',
+            url: `diadema_pipeline/${itemId}/reset/${tool.id}`,
+        }).done(() => {
+            events.trigger('g:alert', {
+                icon: 'ok',
+                text: `${tool.label}: job resettato.`,
+                type: 'success',
+                timeout: 4000,
+            });
+            const curDiadema = Object.assign({}, itemView.model.get('diadema') || {});
+            curDiadema[tool.id] = Object.assign({}, curDiadema[tool.id] || {}, { status: 'cancelled' });
+            itemView.model.set('diadema', curDiadema);
+            DiademaPanel._setBadge($panel, tool.id, 'cancelled');
+            DiademaPanel._updateRunButtonState(itemView, $panel);
+        }).fail(err => {
+            const msg = err.responseJSON?.message || 'Errore sconosciuto';
+            events.trigger('g:alert', {
+                icon: 'cancel',
+                text: `Errore reset ${tool.label}: ${msg}`,
+                type: 'danger',
+                timeout: 5000,
+            });
+            $resetBtn.prop('disabled', false).html('<i class="icon-cw"></i> Force reset');
+        });
     },
 
     // ── Handler bottone Cancel ────────────────────────────────────────────────

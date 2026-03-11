@@ -131,7 +131,20 @@ def set_job_cancelled(gc, job_id, task_name):
         gc.put(f"job/{job_id}", parameters={"status": 5})
         logger.info("[%s] Job %s → CANCELLED", task_name, job_id)
     except Exception as exc:
-        logger.warning("[%s] set CANCELLED fallito: %s", task_name, exc)
+        # La transizione CANCELING(824) → CANCELLED(5) non è accettata dalla normale API Girder.
+        # Usiamo il nostro endpoint che bypassa la validazione via aggiornamento diretto MongoDB.
+        logger.warning(
+            "[%s] set CANCELLED normale fallito (%s), provo force_cancelled...",
+            task_name,
+            exc,
+        )
+        try:
+            # Ricava il base URL dal gc già configurato
+            base = gc.urlBase.rstrip("/")  # es. http://girder:8080/api/v1
+            gc.post(f"diadema_pipeline/job/{job_id}/force_cancelled")
+            logger.info("[%s] Job %s → CANCELLED (force)", task_name, job_id)
+        except Exception as exc2:
+            logger.warning("[%s] force_cancelled fallito: %s", task_name, exc2)
 
 
 def kill_proc(proc, task_name):

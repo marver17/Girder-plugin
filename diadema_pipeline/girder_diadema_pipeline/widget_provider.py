@@ -57,22 +57,22 @@ class DiademaWidgetProvider(WidgetProviderBase):
 
     def should_display(self, item):
         enabled, _, _ = _get_settings()
-        meta = item.get("meta") or {}
+        diadema = item.get("diadema") or {}
         return any(
-            enabled.get(t, False) and f"diadema_{t}_results" in meta
+            enabled.get(t, False) and (diadema.get(t) or {}).get("results") is not None
             for t in ("mriqc", "freesurfer", "lstai")
         )
 
     def get_data(self, item):
         enabled, fields_mriqc, fields_fs = _get_settings()
-        meta = item.get("meta") or {}
+        diadema = item.get("diadema") or {}
 
         data = {}
 
         if enabled.get("mriqc", True):
-            results = meta.get("diadema_mriqc_results")
+            tool_data = diadema.get("mriqc") or {}
+            results = tool_data.get("results")
             if results and "metrics" in results:
-                # Filtra le metriche esposte in base alla configurazione
                 filtered_metrics = {
                     k: v
                     for k, v in results["metrics"].items()
@@ -81,14 +81,14 @@ class DiademaWidgetProvider(WidgetProviderBase):
                 results = {**results, "metrics": filtered_metrics}
             data["mriqc"] = {
                 "results": results,
-                "status": meta.get("diadema_mriqc_status"),
+                "status": tool_data.get("status"),
             }
 
         if enabled.get("freesurfer", True):
-            results = meta.get("diadema_freesurfer_results")
+            tool_data = diadema.get("freesurfer") or {}
+            results = tool_data.get("results")
             if results and "stats" in results:
                 stats = results["stats"]
-                # Filtra volumi subcorticali e globali esposti in base alla configurazione
                 if fields_fs:
                     filtered_sub = {
                         k: v
@@ -110,13 +110,14 @@ class DiademaWidgetProvider(WidgetProviderBase):
                     }
             data["freesurfer"] = {
                 "results": results,
-                "status": meta.get("diadema_freesurfer_status"),
+                "status": tool_data.get("status"),
             }
 
         if enabled.get("lstai", False):
+            tool_data = diadema.get("lstai") or {}
             data["lstai"] = {
-                "results": meta.get("diadema_lstai_results"),
-                "status": meta.get("diadema_lstai_status"),
+                "results": tool_data.get("results"),
+                "status": tool_data.get("status"),
             }
 
         return data

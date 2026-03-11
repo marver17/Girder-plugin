@@ -34,11 +34,11 @@ function _registerWidget(registry) {
         component: DiademaResultsWidget,
         priority: 15,
         shouldRender: (item) => {
-            const meta = item.get('meta') || {};
+            const diadema = item.get('diadema') || {};
             return (
-                meta.diadema_mriqc_results     !== undefined ||
-                meta.diadema_freesurfer_results !== undefined ||
-                meta.diadema_lstai_results      !== undefined
+                diadema.mriqc?.results      !== undefined ||
+                diadema.freesurfer?.results !== undefined ||
+                diadema.lstai?.results      !== undefined
             );
         },
     });

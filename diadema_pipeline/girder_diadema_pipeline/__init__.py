@@ -32,24 +32,8 @@ class DiademaPlugin(GirderPlugin):
         )  # registra validatori e default  # noqa: F401
         from .widget_provider import DiademaWidgetProvider
 
-        # Esponi i campi di ogni tool via REST (AccessType.READ)
-        Item().exposeFields(
-            level=AccessType.READ,
-            fields={
-                # MRIQC
-                "diadema_mriqc_results",
-                "diadema_mriqc_status",
-                "diadema_mriqc_error",
-                # FreeSurfer
-                "diadema_freesurfer_results",
-                "diadema_freesurfer_status",
-                "diadema_freesurfer_error",
-                # LST-AI
-                "diadema_lstai_results",
-                "diadema_lstai_status",
-                "diadema_lstai_error",
-            },
-        )
+        # Esponi il campo diadema (tutti i dati di elaborazione) via REST
+        Item().exposeFields(level=AccessType.READ, fields={"diadema"})
 
         info["apiRoot"].diadema_pipeline = DiademaResource()
 

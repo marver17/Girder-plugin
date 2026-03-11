@@ -25,7 +25,7 @@ from ._helpers import (
     now_iso,
     resolve_girder_url,
     set_running,
-    update_item_fields,
+    update_diadema_tool,
 )
 
 logger = logging.getLogger(__name__)
@@ -37,8 +37,12 @@ _NOT_IMPLEMENTED_MSG = (
 
 
 @girder_job(title="DIADEMA – LST-AI")
-@app.task(bind=True, acks_late=True, reject_on_worker_lost=True,
-          name="girder_diadema_pipeline.tasks.run_lstai_task")
+@app.task(
+    bind=True,
+    acks_late=True,
+    reject_on_worker_lost=True,
+    name="girder_diadema_pipeline.tasks.run_lstai_task",
+)
 def run_lstai_task(task, **kwargs):
     """
     Esegue LST-AI su file NIfTI (T1 ± FLAIR) per segmentazione lesioni WM.
@@ -56,12 +60,12 @@ def run_lstai_task(task, **kwargs):
     """
     from girder_client import GirderClient
 
-    TASK_NAME    = "run_lstai_task"
-    item_id      = kwargs.get("item_id")
-    job_id       = kwargs.get("job_id")
+    TASK_NAME = "run_lstai_task"
+    item_id = kwargs.get("item_id")
+    job_id = kwargs.get("job_id")
     job_token_id = kwargs.get("job_token_id")
 
-    girder_api_url      = resolve_girder_url(task)
+    girder_api_url = resolve_girder_url(task)
     girder_client_token = getattr(task.request, "girder_client_token", None)
 
     gc = GirderClient(apiUrl=girder_api_url)
@@ -72,14 +76,24 @@ def run_lstai_task(task, **kwargs):
 
     set_running(girder_api_url, job_id, job_token_id, TASK_NAME)
     progress = make_safe_progress(task, TASK_NAME)
-    progress("LST-AI: tool non ancora implementato in questa installazione.",
-             total=100, current=5)
+    progress(
+        "LST-AI: tool non ancora implementato in questa installazione.",
+        total=100,
+        current=5,
+    )
 
-    logger.warning("[%s] Tentativo di eseguire un task non implementato (item_id=%s)", TASK_NAME, item_id)
+    logger.warning(
+        "[%s] Tentativo di eseguire un task non implementato (item_id=%s)",
+        TASK_NAME,
+        item_id,
+    )
 
-    update_item_fields(gc, item_id,
-        diadema_lstai_status="not_implemented",
-        diadema_lstai_error={
+    update_diadema_tool(
+        gc,
+        item_id,
+        "lstai",
+        status="not_implemented",
+        error={
             "message": _NOT_IMPLEMENTED_MSG,
             "timestamp": now_iso(),
         },
@@ -92,4 +106,3 @@ def run_lstai_task(task, **kwargs):
         logger.warning("[%s] set ERROR non-fatal: %s", TASK_NAME, exc)
 
     return {"status": "not_implemented", "message": _NOT_IMPLEMENTED_MSG}
-

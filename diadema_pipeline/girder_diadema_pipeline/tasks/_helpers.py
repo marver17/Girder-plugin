@@ -97,11 +97,31 @@ def make_safe_progress(task, task_name):
 
 
 def update_item_fields(gc, item_id, **fields):
-    """Salva campi di metadati sull'item Girder senza sollevare eccezioni."""
+    """Salva campi di metadati sull'item Girder senza sollevare eccezioni.
+
+    DEPRECATO: usare update_diadema_tool() per i dati di elaborazione DIADEMA.
+    """
     try:
         gc.put(f"item/{item_id}/metadata", json=fields)
     except Exception as exc:
         logger.warning("[diadema] update item %s fallito: %s", item_id, exc)
+
+
+def update_diadema_tool(gc, item_id, tool_id, **data):
+    """Aggiorna i dati di elaborazione per un tool DIADEMA.
+
+    Scrive in item.diadema.{tool_id} (campo dedicato, separato da item.meta).
+    I chiavi tipiche sono: status, results, error, job_id.
+    """
+    try:
+        gc.put(f"diadema_pipeline/{item_id}/processing/{tool_id}", json=data)
+    except Exception as exc:
+        logger.warning(
+            "[diadema] update_diadema_tool item=%s tool=%s fallito: %s",
+            item_id,
+            tool_id,
+            exc,
+        )
 
 
 def set_job_cancelled(gc, job_id, task_name):

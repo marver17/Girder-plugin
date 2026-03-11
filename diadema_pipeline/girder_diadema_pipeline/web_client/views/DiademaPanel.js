@@ -57,6 +57,46 @@ const DiademaPanel = {
 
         DiademaPanel._bindEvents(itemView, $panel);
         DiademaPanel._refreshBadges(itemView);
+        DiademaPanel._resumeActiveJobs(itemView, $panel);
+    },
+
+    // ── Helper: legge stato e risultati di un tool dall'item model ────────────
+
+    _getToolMeta(itemModel, tool) {
+        const item = itemModel.toJSON ? itemModel.toJSON() : itemModel;
+        const toolData = (item.diadema || {})[tool.id] || {};
+        return {
+            status:  toolData.status  || null,
+            results: toolData.results || null,
+        };
+    },
+
+    // ── Riprende il polling per i job attivi al (ri)caricamento della pagina ──
+
+    _resumeActiveJobs(itemView, $panel) {
+        const ACTIVE = ['running', 'queued', 'processing'];
+        TOOLS.forEach(tool => {
+            const { status } = DiademaPanel._getToolMeta(itemView.model, tool);
+            if (ACTIVE.includes(status)) {
+                DiademaPanel._pollForResults(itemView, $panel, itemView.model.id, tool.id, 8000);
+            }
+        });
+        // Aggiorna subito lo stato del bottone per il tool selezionato
+        DiademaPanel._updateRunButtonState(itemView, $panel);
+    },
+
+    // ── Aggiorna il bottone Run in base allo stato del tool selezionato ───────
+
+    _updateRunButtonState(itemView, $panel) {
+        const ACTIVE = ['running', 'queued', 'processing'];
+        const tool = DiademaPanel._getSelectedTool($panel);
+        const { status } = DiademaPanel._getToolMeta(itemView.model, tool);
+        const $btn = $panel.find('.g-diadema-run-btn');
+        if (ACTIVE.includes(status)) {
+            $btn.prop('disabled', true).html('<i class="icon-spin3 animate-spin"></i> In corso…');
+        } else {
+            $btn.prop('disabled', false).html('<i class="icon-play"></i> Run');
+        }
     },
 
     // ── Costruisce il DOM del pannello ────────────────────────────────────────
@@ -130,6 +170,9 @@ const DiademaPanel = {
             if ($panel.find('.g-diadema-advanced-panel').is(':visible')) {
                 DiademaPanel._renderParamForm(itemView, $panel, DiademaPanel._getSelectedTool($panel));
             }
+
+            // Aggiorna lo stato del bottone Run per il tool appena selezionato
+            DiademaPanel._updateRunButtonState(itemView, $panel);
         });
 
         // Highlight iniziale del primo radio
@@ -296,7 +339,7 @@ const DiademaPanel = {
         let participantLabel = '001';
         const subMatch = fileName.match(/sub-([a-zA-Z0-9]+)/i);
         if (subMatch) participantLabel = subMatch[1];
-        const prevQC = item.diadema_mriqc_results || item.meta?.diadema_mriqc_results;
+        const prevQC = item.diadema?.mriqc?.results;
         if (prevQC?.participant_label) participantLabel = prevQC.participant_label;
 
         // Modality: dal nome file (BIDS), poi metadata, poi stima
@@ -329,10 +372,35 @@ const DiademaPanel = {
 
     _onRun(itemView, $panel) {
         const tool = DiademaPanel._getSelectedTool($panel);
-        const params = DiademaPanel._collectParams(tool, $panel);
         const itemId = itemView.model.id;
-
         const $runBtn = $panel.find('.g-diadema-run-btn');
+
+        const ACTIVE = ['running', 'queued', 'processing'];
+        const { status, results } = DiademaPanel._getToolMeta(itemView.model, tool);
+
+        // ── Blocca se il job è già attivo ─────────────────────────────────────
+        if (ACTIVE.includes(status)) {
+            events.trigger('g:alert', {
+                icon: 'info-circled',
+                text: `${tool.label} è già in corso (stato: ${status}). Attendi il completamento.`,
+                type: 'info',
+                timeout: 5000,
+            });
+            return;
+        }
+
+        // ── Chiede conferma se il tool è già stato eseguito ───────────────────
+        if (results) {
+            // eslint-disable-next-line no-alert
+            if (!window.confirm(
+                `${tool.label} è già stato eseguito su questo item.\n\nVuoi rieseguirlo sovrascrivendo i risultati esistenti?`
+            )) return;
+        }
+
+        const params = DiademaPanel._collectParams(tool, $panel);
+        // Passa force=true se l'utente ha confermato la riesecuzione
+        if (results) params.force = true;
+
         $runBtn.prop('disabled', true)
                .html(`<i class="icon-spin3 animate-spin"></i> In coda…`);
 
@@ -348,13 +416,13 @@ const DiademaPanel = {
                 timeout: 5000,
             });
 
-            // Badge provvisorio "queued"
-            DiademaPanel._setBadge($panel, tool.id, 'queued');
+            // Aggiorna subito il modello Backbone con lo stato 'queued'
+            // così _updateRunButtonState lo mantiene disabilitato durante il polling
+            const curDiadema = Object.assign({}, itemView.model.get('diadema') || {});
+            curDiadema[tool.id] = Object.assign({}, curDiadema[tool.id] || {}, { status: 'queued' });
+            itemView.model.set('diadema', curDiadema);
 
-            // Ripristina il bottone dopo un po'
-            setTimeout(() => {
-                $runBtn.prop('disabled', false).html('<i class="icon-play"></i> Run');
-            }, 3000);
+            DiademaPanel._setBadge($panel, tool.id, 'queued');
 
             DiademaPanel._pollForResults(itemView, $panel, itemId, tool.id, 15000);
 
@@ -374,8 +442,6 @@ const DiademaPanel = {
 
     _pollForResults(itemView, $panel, itemId, toolId, intervalMs) {
         const tool = TOOLS.find(t => t.id === toolId);
-        const statusField  = `${tool.resultField}_status`;
-        const resultsField = `${tool.resultField}_results`;
 
         let pollCount = 0;
         const maxPolls = 120;  // ~30 min a 15 s/poll
@@ -384,34 +450,39 @@ const DiademaPanel = {
             pollCount++;
 
             restRequest({ method: 'GET', url: `item/${itemId}` }).done(item => {
-                const status  = item[statusField]  || item.meta?.[statusField];
-                const results = item[resultsField] || item.meta?.[resultsField];
+                const toolData = (item.diadema || {})[toolId] || {};
+                const status  = toolData.status;
+                const results = toolData.results;
 
                 // Aggiorna il badge in tempo reale durante il polling
                 if (status) DiademaPanel._setBadge($panel, toolId, status);
 
                 if (status === 'completed') {
                     // Aggiorna il modello Backbone → triggera il widget nifti_viewer
-                    itemView.model.set({
-                        [statusField]:  status,
-                        [resultsField]: results,
-                    });
+                    const curDia = Object.assign({}, itemView.model.get('diadema') || {});
+                    curDia[toolId] = Object.assign({}, curDia[toolId] || {}, { status, results });
+                    itemView.model.set('diadema', curDia);
                     events.trigger('g:alert', {
                         icon: 'ok',
                         text: `${tool.label} completato!`,
                         type: 'success',
                         timeout: 4000,
                     });
+                    DiademaPanel._updateRunButtonState(itemView, $panel);
 
                 } else if (status === 'error') {
-                    const errField = `${tool.resultField}_error`;
-                    const errMsg = item[errField] || item.meta?.[errField] || '';
+                    const errMsg = toolData.error?.message || '';
                     events.trigger('g:alert', {
                         icon: 'cancel',
                         text: `${tool.label} fallito${errMsg ? ': ' + errMsg : ''}`,
                         type: 'danger',
                         timeout: 6000,
                     });
+                    // Aggiorna modello con lo stato di errore e ripristina Run
+                    const curDia = Object.assign({}, itemView.model.get('diadema') || {});
+                    curDia[toolId] = Object.assign({}, curDia[toolId] || {}, { status: 'error' });
+                    itemView.model.set('diadema', curDia);
+                    DiademaPanel._updateRunButtonState(itemView, $panel);
 
                 } else if (pollCount < maxPolls) {
                     setTimeout(check, intervalMs);
@@ -423,6 +494,7 @@ const DiademaPanel = {
                         type: 'warning',
                         timeout: 8000,
                     });
+                    DiademaPanel._updateRunButtonState(itemView, $panel);
                 }
             });
         };
@@ -435,11 +507,9 @@ const DiademaPanel = {
     _refreshBadges(itemView) {
         const $panel = itemView.$('.g-diadema-panel');
         if (!$panel.length) return;
-        const item = itemView.model.toJSON();
 
         TOOLS.forEach(tool => {
-            const status = item[`${tool.resultField}_status`]
-                        || item.meta?.[`${tool.resultField}_status`];
+            const { status } = DiademaPanel._getToolMeta(itemView.model, tool);
             DiademaPanel._setBadge($panel, tool.id, status || null);
         });
     },

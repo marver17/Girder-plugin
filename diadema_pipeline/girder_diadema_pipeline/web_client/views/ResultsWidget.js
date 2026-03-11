@@ -67,8 +67,11 @@ const DiademaResultsWidget = View.extend({
 
     fetchData() {
         // Legge le settings admin per sapere quali campi mostrare,
-        // poi combina con i dati in item.meta.
-        const meta = this.item.get('meta') || {};
+        // poi combina con i dati in item.diadema (campo dedicato).
+        const diadema = this.item.get('diadema') || {};
+        const mriqcData = diadema.mriqc || {};
+        const fsData    = diadema.freesurfer || {};
+        const lstaiData = diadema.lstai || {};
 
         return restRequest({
             method: 'GET',
@@ -80,7 +83,7 @@ const DiademaResultsWidget = View.extend({
             const fieldsFs    = settings['diadema.widget_fields_freesurfer'] || [];
 
             // ── MRIQC ──────────────────────────────────────────────────────
-            let mriqcResults = meta.diadema_mriqc_results || null;
+            let mriqcResults = mriqcData.results || null;
             if (mriqcResults && fieldsMriqc.length && mriqcResults.metrics) {
                 const filtered = {};
                 fieldsMriqc.forEach(k => {
@@ -90,7 +93,7 @@ const DiademaResultsWidget = View.extend({
             }
 
             // ── FreeSurfer ─────────────────────────────────────────────────
-            let fsResults = meta.diadema_freesurfer_results || null;
+            let fsResults = fsData.results || null;
             if (fsResults && fieldsFs.length && fsResults.stats) {
                 const s = fsResults.stats;
                 const filtSub  = {};
@@ -104,22 +107,22 @@ const DiademaResultsWidget = View.extend({
 
             return {
                 enabled,
-                mriqcResults:  enabled.mriqc      !== false ? mriqcResults : null,
-                mriqcStatus:   meta.diadema_mriqc_status,
-                fsResults:     enabled.freesurfer  !== false ? fsResults    : null,
-                fsStatus:      meta.diadema_freesurfer_status,
-                lstaiResults:  enabled.lstai       ? meta.diadema_lstai_results  : null,
-                lstaiStatus:   meta.diadema_lstai_status,
+                mriqcResults:  enabled.mriqc      !== false ? mriqcResults   : null,
+                mriqcStatus:   mriqcData.status,
+                fsResults:     enabled.freesurfer  !== false ? fsResults      : null,
+                fsStatus:      fsData.status,
+                lstaiResults:  enabled.lstai       ? lstaiData.results        : null,
+                lstaiStatus:   lstaiData.status,
             };
         }).catch(() => {
             // Settings non accessibili (utente non admin): mostra tutto senza filtro
             return {
-                mriqcResults:  meta.diadema_mriqc_results,
-                mriqcStatus:   meta.diadema_mriqc_status,
-                fsResults:     meta.diadema_freesurfer_results,
-                fsStatus:      meta.diadema_freesurfer_status,
-                lstaiResults:  meta.diadema_lstai_results,
-                lstaiStatus:   meta.diadema_lstai_status,
+                mriqcResults:  mriqcData.results,
+                mriqcStatus:   mriqcData.status,
+                fsResults:     fsData.results,
+                fsStatus:      fsData.status,
+                lstaiResults:  lstaiData.results,
+                lstaiStatus:   lstaiData.status,
             };
         });
     },

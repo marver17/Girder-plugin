@@ -37,7 +37,7 @@ from ._helpers import (
     set_job_cancelled,
     set_running,
     tool_version,
-    update_item_fields,
+    update_diadema_tool,
 )
 
 # Default dir se non viene passato nulla
@@ -170,15 +170,14 @@ def run_mriqc_task(task, **kwargs):
                 f"Acquisizione 2D non supportata da MRIQC: shape={img.shape[:3]}, "
                 f"solo {img.shape[2]} slice (minimo 10)."
             )
-            update_item_fields(
+            update_diadema_tool(
                 gc,
                 item_id,
-                diadema_mriqc_status="error",
-                diadema_mriqc_error={"message": msg, "timestamp": now_iso()},
+                "mriqc",
+                status="error",
+                error={"message": msg, "timestamp": now_iso()},
             )
             raise Exception(msg)
-
-        progress("Avvio MRIQC (potrebbero volerci diversi minuti)...", current=30)
 
         mriqc_cmd = [
             "mriqc",
@@ -233,11 +232,12 @@ def run_mriqc_task(task, **kwargs):
                         current=50,
                     )
                     kill_proc(proc, TASK_NAME)
-                    update_item_fields(
+                    update_diadema_tool(
                         gc,
                         item_id,
-                        diadema_mriqc_status="cancelled",
-                        diadema_mriqc_error={
+                        "mriqc",
+                        status="cancelled",
+                        error={
                             "message": "Job cancellato dall'utente",
                             "timestamp": now_iso(),
                         },
@@ -287,10 +287,11 @@ def run_mriqc_task(task, **kwargs):
                         "[%s] pulizia work dir non-fatal: %s", TASK_NAME, _rm_e
                     )
 
-            update_item_fields(
+            update_diadema_tool(
                 gc,
                 item_id,
-                diadema_mriqc_results={
+                "mriqc",
+                results={
                     "metrics": metrics,
                     "timestamp": now_iso(),
                     "mriqc_version": tool_version("mriqc"),
@@ -301,7 +302,7 @@ def run_mriqc_task(task, **kwargs):
                     "output_dir": str(output_dir),
                     "reports_uploaded": uploaded,
                 },
-                diadema_mriqc_status="completed",
+                status="completed",
             )
             progress("Quality control completato!", current=100)
             return {"status": "success", "item_id": item_id, "metrics": metrics}
@@ -312,20 +313,22 @@ def run_mriqc_task(task, **kwargs):
         except subprocess.TimeoutExpired:
             msg = f"MRIQC timeout dopo {timeout}s"
             logger.error("[%s] %s", TASK_NAME, msg)
-            update_item_fields(
+            update_diadema_tool(
                 gc,
                 item_id,
-                diadema_mriqc_status="error",
-                diadema_mriqc_error={"message": msg, "timestamp": now_iso()},
+                "mriqc",
+                status="error",
+                error={"message": msg, "timestamp": now_iso()},
             )
             raise Exception(msg)
 
         except Exception as exc:
             logger.exception("[%s] Errore non gestito: %s", TASK_NAME, exc)
-            update_item_fields(
+            update_diadema_tool(
                 gc,
                 item_id,
-                diadema_mriqc_status="error",
-                diadema_mriqc_error={"message": str(exc), "timestamp": now_iso()},
+                "mriqc",
+                status="error",
+                error={"message": str(exc), "timestamp": now_iso()},
             )
             raise

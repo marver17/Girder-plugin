@@ -62,7 +62,7 @@ from ._helpers import (
     set_job_cancelled,
     set_running,
     tool_version,
-    update_item_fields,
+    update_diadema_tool,
 )
 
 _DEFAULT_SUBJECTS_DIR = "/data/diadema/subjects"
@@ -264,15 +264,16 @@ def upload_freesurfer_results(task, **kwargs):
         tmp_path.unlink(missing_ok=True)
 
     progress("Aggiornamento metadati item...", current=90)
-    update_item_fields(
+    update_diadema_tool(
         gc,
         item_id,
-        diadema_freesurfer_results={
+        "freesurfer",
+        results={
             **result_meta,
             "stats": stats,
             "files_uploaded": uploaded,
         },
-        diadema_freesurfer_status="completed",
+        status="completed",
     )
 
     # Pulizia directory soggetto (opzionale)
@@ -355,11 +356,12 @@ def run_freesurfer_task(task, **kwargs):
             f"Direttiva non valida: '{directive}'. "
             f"Valori ammessi: {sorted(_VALID_DIRECTIVES)}"
         )
-        update_item_fields(
+        update_diadema_tool(
             gc,
             item_id,
-            diadema_freesurfer_status="error",
-            diadema_freesurfer_error={"message": msg, "timestamp": now_iso()},
+            "freesurfer",
+            status="error",
+            error={"message": msg, "timestamp": now_iso()},
         )
         raise Exception(msg)
 
@@ -482,11 +484,12 @@ def run_freesurfer_task(task, **kwargs):
                     )
                     kill_proc(proc, TASK_NAME)
                     _log_thread.join(timeout=5)
-                    update_item_fields(
+                    update_diadema_tool(
                         gc,
                         item_id,
-                        diadema_freesurfer_status="cancelled",
-                        diadema_freesurfer_error={
+                        "freesurfer",
+                        status="cancelled",
+                        error={
                             "message": "Job cancellato dall'utente",
                             "timestamp": now_iso(),
                         },
@@ -544,11 +547,12 @@ def run_freesurfer_task(task, **kwargs):
             )
 
             # Aggiorna lo status a "uploading" mentre il sub-task gira
-            update_item_fields(
+            update_diadema_tool(
                 gc,
                 item_id,
-                diadema_freesurfer_status="uploading",
-                diadema_freesurfer_results={
+                "freesurfer",
+                status="uploading",
+                results={
                     **result_meta,
                     "stats": stats,
                 },
@@ -570,20 +574,22 @@ def run_freesurfer_task(task, **kwargs):
         except subprocess.TimeoutExpired:
             msg = f"recon-all timeout dopo {timeout}s ({timeout // 3600}h)"
             logger.error("[%s] %s", TASK_NAME, msg)
-            update_item_fields(
+            update_diadema_tool(
                 gc,
                 item_id,
-                diadema_freesurfer_status="error",
-                diadema_freesurfer_error={"message": msg, "timestamp": now_iso()},
+                "freesurfer",
+                status="error",
+                error={"message": msg, "timestamp": now_iso()},
             )
             raise Exception(msg)
 
         except Exception as exc:
             logger.exception("[%s] Errore non gestito: %s", TASK_NAME, exc)
-            update_item_fields(
+            update_diadema_tool(
                 gc,
                 item_id,
-                diadema_freesurfer_status="error",
-                diadema_freesurfer_error={"message": str(exc), "timestamp": now_iso()},
+                "freesurfer",
+                status="error",
+                error={"message": str(exc), "timestamp": now_iso()},
             )
             raise

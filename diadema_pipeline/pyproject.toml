@@ -45,3 +45,10 @@ diadema_pipeline_tasks = "girder_diadema_pipeline.worker_entry:load_worker_plugi
 
 [tool.setuptools.packages.find]
 include = ["girder_diadema_pipeline*"]
+
+[tool.setuptools.package-data]
+girder_diadema_pipeline = [
+    "web_client/dist/*.js",
+    "web_client/dist/*.cjs",
+    "web_client/dist/*.map",
+]

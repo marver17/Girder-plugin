@@ -33,6 +33,33 @@ const STATUS_CLASSES = {
 const DiademaPanel = {
 
     /**
+     * Restituisce true se l'item contiene (o è) un file NIfTI.
+     * Controllo sincrono su nome + diadema; se ambiguo risolve async via files API.
+     * @returns {boolean|Promise<boolean>}
+     */
+    _isNiftiItem(item) {
+        const name = (item.get('name') || '').toLowerCase();
+        if (name.endsWith('.nii') || name.endsWith('.nii.gz')) return true;
+
+        // Già processato da DIADEMA → mostra comunque
+        const diadema = item.get('diadema') || {};
+        if (Object.keys(diadema).length > 0) return true;
+
+        // Controllo asincrono sulle files dell'item
+        return restRequest({
+            method: 'GET',
+            url: `item/${item.id}/files`,
+            data: { limit: 20 },
+            error: null,
+        }).then((files) => {
+            return (files || []).some(f => {
+                const n = (f.name || '').toLowerCase();
+                return n.endsWith('.nii') || n.endsWith('.nii.gz');
+            });
+        }).catch(() => false);
+    },
+
+    /**
      * Entry point: chiamato da main.js dopo il render della ItemView.
      * @param {ItemView} itemView - Istanza della Girder ItemView
      */
@@ -40,6 +67,24 @@ const DiademaPanel = {
         const item = itemView.model;
         if (!item) return;
 
+        // Evita double-mount su re-render
+        if (itemView.$('.g-diadema-panel').length) {
+            DiademaPanel._refreshBadges(itemView);
+            return;
+        }
+
+        const result = DiademaPanel._isNiftiItem(item);
+        if (result && typeof result === 'object' && typeof result.then === 'function') {
+            // Risposta asincrona (controllo files)
+            result.then(isNifti => {
+                if (isNifti) DiademaPanel._mountPanel(itemView);
+            });
+        } else if (result) {
+            DiademaPanel._mountPanel(itemView);
+        }
+    },
+
+    _mountPanel(itemView) {
         // Evita double-mount su re-render
         if (itemView.$('.g-diadema-panel').length) {
             DiademaPanel._refreshBadges(itemView);

@@ -35,6 +35,7 @@ cd deploy/testing
 cp .env.example .env
 # Modifica almeno le password:
 #   RABBITMQ_PASS
+#   GIRDER_ADMIN_PASSWORD
 ```
 
 ### 2. Licenza FreeSurfer
@@ -94,18 +95,78 @@ MongoDB e Redis **non** sono esposti sull'host (accesso solo tra container).
 
 ---
 
-## Primo avvio: crea l'utente admin
+## Verifica post-avvio
 
-Dopo che Girder è healthy (`docker compose ps`):
+### Stato dei container
 
 ```bash
-docker compose exec girder \
-    girder-cli --api-url http://localhost:8080/api/v1 \
-    user create \
-    --login admin \
-    --email admin@example.com \
-    --password changeme \
-    --admin
+docker compose ps
+```
+
+Tutti i container devono risultare `healthy` (o `running` per quelli senza healthcheck).
+
+### Bootstrap automatico (admin + assetstore + settings)
+
+Il bootstrap viene eseguito automaticamente all'avvio di `girder` prima
+di `girder serve`. Verifica i log:
+
+```bash
+docker compose logs girder | grep -E '\[bootstrap\]|Bootstrap'
+```
+
+Output atteso:
+
+```
+[bootstrap] INFO: Created filesystem assetstore 'Primary Assetstore' at /data/assetstore
+[bootstrap] INFO: Set setting 'core.brand_name'
+[bootstrap] INFO: Set setting 'core.registration_policy'
+[bootstrap] INFO: Set setting 'core.email_verification'
+[bootstrap] INFO: Set setting 'core.enable_password_login'
+[bootstrap] INFO: Created admin user 'admin'
+```
+
+> Se Girder era già configurato (riavvio) il bootstrap è idempotente:
+> non ricrea l'utente né l'assetstore, stampa solo messaggi `DEBUG`.
+
+### API Girder raggiungibile
+
+```bash
+curl -s http://localhost:8080/api/v1/system/version | python3 -m json.tool
+```
+
+### Login admin via API
+
+```bash
+curl -s -u admin:changeme_admin \
+  http://localhost:8080/api/v1/user/me | python3 -m json.tool
+```
+
+Deve restituire il profilo con `"admin": true`.
+
+### Assetstore configurato
+
+```bash
+curl -s -u admin:changeme_admin \
+  http://localhost:8080/api/v1/assetstore | python3 -m json.tool
+```
+
+Deve restituire un array con almeno un assetstore `"current": true`.
+
+### Plugin registrati
+
+```bash
+curl -s -u admin:changeme_admin \
+  http://localhost:8080/api/v1/system/plugins | python3 -m json.tool
+```
+
+Verifica che `oauth2`, `nifti_viewer` e `diadema_pipeline` siano presenti
+nell'elenco dei plugin abilitati.
+
+### Coda Celery attiva
+
+```bash
+docker compose exec celery-worker \
+  celery -A girder_worker.app inspect ping
 ```
 
 ---
@@ -142,7 +203,7 @@ docker compose down -v
 ### Plugin installati automaticamente
 
 All'avvio il container Girder esegue `entrypoint-girder.sh` che installa
-in editable mode i plugin da `/workspace/`:
+i plugin da `/workspace/` (installazione normale, senza editable mode):
 
 ```
 oauth2

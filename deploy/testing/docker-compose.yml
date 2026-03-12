@@ -86,7 +86,23 @@ services:
       timeout: 3s
       retries: 5
       start_period: 10s
+  # ── Init: corregge ownership volumi prima dei servizi applicativi ────────
 
+  init-permissions:
+    image: alpine:3
+    container_name: diadema-test-init-permissions
+    networks: [diadema-test-net]
+    user: root
+    command:
+      - sh
+      - -c
+      - |
+        mkdir -p /data/assetstore
+        chown -R 1000:1000 /data
+        echo "Permessi corretti su /data/assetstore"
+    volumes:
+      - girder_assetstore:/data/assetstore
+    restart: "no"
   # ── Girder server ───────────────────────────────────────────────────────────
 
   girder:
@@ -103,13 +119,30 @@ services:
         condition: service_healthy
       rabbitmq:
         condition: service_healthy
+      init-permissions:
+        condition: service_completed_successfully
     environment:
       <<: *girder-env
+      # ── Bootstrap ──────────────────────────────────────────────────────────
+      GIRDER_ADMIN_LOGIN: ${GIRDER_ADMIN_LOGIN:-admin}
+      GIRDER_ADMIN_PASSWORD: ${GIRDER_ADMIN_PASSWORD:-changeme_admin}
+      GIRDER_ADMIN_EMAIL: ${GIRDER_ADMIN_EMAIL:-admin@example.com}
+      GIRDER_ADMIN_FIRST_NAME: ${GIRDER_ADMIN_FIRST_NAME:-Admin}
+      GIRDER_ADMIN_LAST_NAME: ${GIRDER_ADMIN_LAST_NAME:-User}
+      GIRDER_ADMIN_RESET_PASSWORD: ${GIRDER_ADMIN_RESET_PASSWORD:-false}
+      GIRDER_ASSETSTORE_PATH: ${GIRDER_ASSETSTORE_PATH:-/data/assetstore}
+      GIRDER_ASSETSTORE_NAME: ${GIRDER_ASSETSTORE_NAME:-Primary Assetstore}
+      GIRDER_BRAND_NAME: ${GIRDER_BRAND_NAME:-DIADEMA}
+      GIRDER_REGISTRATION_POLICY: ${GIRDER_REGISTRATION_POLICY:-closed}
+      GIRDER_EMAIL_VERIFICATION: ${GIRDER_EMAIL_VERIFICATION:-disabled}
+      GIRDER_ENABLE_PASSWORD_LOGIN: ${GIRDER_ENABLE_PASSWORD_LOGIN:-true}
     volumes:
       # Codice sorgente plugin (installato in editable mode all'avvio)
       - ../../:/workspace
       # Dati persistenti Girder (upload, cache pip packages)
       - girder_data:/home/girder/.local
+      # Assetstore filesystem
+      - girder_assetstore:${GIRDER_ASSETSTORE_PATH:-/data/assetstore}
     ports:
       - "${GIRDER_PORT:-8080}:8080"
     entrypoint: ["/sbin/tini", "--"]
@@ -200,7 +233,7 @@ services:
       - ../../diadema_pipeline:/opt/diadema_pipeline
       - diadema_subjects_data:/data/diadema/subjects
       # Licenza FreeSurfer dall'host (percorso configurato in .env)
-      - ${FREESURFER_LICENSE_PATH:-./freesurfer_license.txt}:/usr/local/freesurfer/license.txt:ro
+      - ${FREESURFER_LICENSE_PATH:-./license.txt}:/usr/local/freesurfer/license.txt:ro
     restart: unless-stopped
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -217,6 +250,8 @@ volumes:
     name: diadema-test-rabbitmq
   girder_data:
     name: diadema-test-girder-data
+  girder_assetstore:
+    name: diadema-test-girder-assetstore
   diadema_mriqc_data:
     name: diadema-test-mriqc-output
   diadema_subjects_data:

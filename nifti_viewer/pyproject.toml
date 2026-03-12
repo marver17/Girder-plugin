@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "girder-nifti-viewer"
-version = "1.1.0"
+version = "0.1.2"
 description = "View NIfTI neuroimaging files in Girder with BIDS support and advanced metadata search"
 readme = "README.md"
 requires-python = ">=3.8"

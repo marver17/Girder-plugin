@@ -399,3 +399,4 @@ vite.config.js.timestamp-*
 vite.config.ts.timestamp-*
 .vite/
 freesurfer-worker/license.txt
+deploy/testing/license.txt

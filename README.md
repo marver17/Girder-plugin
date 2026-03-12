@@ -15,6 +15,9 @@ Plugin per l'autenticazione OAuth2 con supporto per molteplici provider di ident
 
 - **Directory**: `oauth2/`
 - **Provider supportati**: Google, GitHub, Microsoft, Keycloak, Globus, CILogon, LinkedIn, Box, Bitbucket
+### Diadema pipeline
+
+
 
 ## Requisiti
 
@@ -22,7 +25,3 @@ Plugin per l'autenticazione OAuth2 con supporto per molteplici provider di ident
 - Python 3.8+
 - Dipendenze specifiche per ogni plugin 
 
-##TODO
-TODO risolvere problemi orientamento nifti-viewer 
-TODO adattare il nifti viewer ad essere simile a dicom-viewer vecchie
-TODO fix redis configuration docker compose 

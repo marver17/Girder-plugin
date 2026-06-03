@@ -1,0 +1,297 @@
+# ═══════════════════════════════════════════════════════════════════
+# DIADEMA – Docker Compose full stack (Girder + Trame UI + Nginx)
+# ═══════════════════════════════════════════════════════════════════
+# Avvio: docker compose up -d
+# Prerequisiti:
+#   1. cp .env.example .env  (e personalizza i valori)
+#   2. cp /path/to/freesurfer_license.txt ./freesurfer_license.txt
+# ═══════════════════════════════════════════════════════════════════
+
+x-celery-env: &celery-env
+  CELERY_BROKER_URL: "amqp://${RABBITMQ_USER}:${RABBITMQ_PASS}@rabbitmq:5672//"
+  CELERY_RESULT_BACKEND: "mongodb://mongodb:27017/${MONGO_DB:-girder}"
+  CELERY_BROKER_HEARTBEAT: "0"
+  CELERY_WORKER_CANCEL_LONG_RUNNING_TASKS_ON_CONNECTION_LOSS: "true"
+  PYTHONUNBUFFERED: "1"
+
+x-girder-env: &girder-env
+  <<: *celery-env
+  GIRDER_MONGO_URI: "mongodb://mongodb:27017/${MONGO_DB:-girder}"
+  GIRDER_REDIS_URL: "redis://redis:6379"
+  GIRDER_NOTIFICATION_REDIS_URL: "redis://redis:6379"
+  BROKER_URL: "amqp://${RABBITMQ_USER}:${RABBITMQ_PASS}@rabbitmq:5672//"
+  GIRDER_WORKER_CALLBACK_URL: "http://girder:8080/api/v1"
+  GIRDER_API_URL: "http://girder:8080/api/v1"
+
+x-worker-deps: &worker-deps
+  depends_on:
+    rabbitmq:
+      condition: service_healthy
+    mongodb:
+      condition: service_healthy
+    girder:
+      condition: service_healthy
+
+# ─────────────────────────────────────────────────────────────────────────────
+
+services:
+  # ── Infrastruttura ──────────────────────────────────────────────────────────
+
+  mongodb:
+    image: mongo:4.4
+    container_name: diadema-full-mongodb
+    networks: [diadema-full-net]
+    volumes:
+      - mongodb_data:/data/db
+    environment:
+      MONGO_INITDB_DATABASE: ${MONGO_DB:-girder}
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "mongo", "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  redis:
+    image: redis:7-alpine
+    container_name: diadema-full-redis
+    networks: [diadema-full-net]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+
+  rabbitmq:
+    image: rabbitmq:3-management-alpine
+    container_name: diadema-full-rabbitmq
+    networks: [diadema-full-net]
+    restart: unless-stopped
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASS}
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+    ports:
+      - "${RABBITMQ_MGMT_PORT:-15672}:15672"
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+
+  init-permissions:
+    image: alpine:3
+    container_name: diadema-full-init-permissions
+    networks: [diadema-full-net]
+    user: root
+    command:
+      - sh
+      - -c
+      - |
+        mkdir -p /data/assetstore /tmp/diadema_cache
+        chown -R 1000:1000 /data
+        echo "Permessi corretti su /data"
+    volumes:
+      - girder_assetstore:/data/assetstore
+    restart: "no"
+
+  # ── Girder server ───────────────────────────────────────────────────────────
+
+  girder:
+    build:
+      context: ../../
+      dockerfile: Dockerfile
+    image: diadema-girder:latest
+    container_name: diadema-full-girder
+    networks: [diadema-full-net]
+    depends_on:
+      mongodb:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      init-permissions:
+        condition: service_completed_successfully
+    environment:
+      <<: *girder-env
+      GIRDER_ADMIN_LOGIN: ${GIRDER_ADMIN_LOGIN:-admin}
+      GIRDER_ADMIN_PASSWORD: ${GIRDER_ADMIN_PASSWORD:-changeme_admin}
+      GIRDER_ADMIN_EMAIL: ${GIRDER_ADMIN_EMAIL:-admin@example.com}
+      GIRDER_ADMIN_FIRST_NAME: ${GIRDER_ADMIN_FIRST_NAME:-Admin}
+      GIRDER_ADMIN_LAST_NAME: ${GIRDER_ADMIN_LAST_NAME:-User}
+      GIRDER_ADMIN_RESET_PASSWORD: ${GIRDER_ADMIN_RESET_PASSWORD:-false}
+      GIRDER_ASSETSTORE_PATH: ${GIRDER_ASSETSTORE_PATH:-/data/assetstore}
+      GIRDER_ASSETSTORE_NAME: ${GIRDER_ASSETSTORE_NAME:-Primary Assetstore}
+      GIRDER_BRAND_NAME: ${GIRDER_BRAND_NAME:-DIADEMA}
+      GIRDER_REGISTRATION_POLICY: ${GIRDER_REGISTRATION_POLICY:-closed}
+      GIRDER_EMAIL_VERIFICATION: ${GIRDER_EMAIL_VERIFICATION:-disabled}
+      GIRDER_ENABLE_PASSWORD_LOGIN: ${GIRDER_ENABLE_PASSWORD_LOGIN:-true}
+    volumes:
+      - ../../:/workspace
+      - girder_data:/home/girder/.local
+      - girder_assetstore:${GIRDER_ASSETSTORE_PATH:-/data/assetstore}
+    ports:
+      - "8081:8080"   # Girder UI diretta (admin/debug)
+    entrypoint: ["/sbin/tini", "--"]
+    command: ["bash", "/workspace/deploy/testing/entrypoint-girder.sh", "serve"]
+    user: girder
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-fs", "http://localhost:8080/api/v1/system/version"]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 90s
+
+  # ── Trame UI application ────────────────────────────────────────────────────
+
+  trame:
+    build:
+      context: ../../trame_app
+      dockerfile: Dockerfile
+    image: diadema-trame:latest
+    container_name: diadema-full-trame
+    networks: [diadema-full-net]
+    depends_on:
+      girder:
+        condition: service_healthy
+    environment:
+      # Server-side Girder URL (container-to-container)
+      GIRDER_API_URL: "http://girder:8080/api/v1"
+      # Public URL exposed to the browser (via Nginx)
+      GIRDER_PUBLIC_URL: "${DIADEMA_PUBLIC_URL:-http://localhost}"
+      TRAME_HOST: "0.0.0.0"
+      TRAME_PORT: "8888"
+      DIADEMA_CACHE_DIR: "/tmp/diadema_cache"
+    volumes:
+      - trame_cache:/tmp/diadema_cache
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-fs", "http://localhost:8888/"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+
+  # ── Nginx reverse proxy ─────────────────────────────────────────────────────
+
+  nginx:
+    image: nginx:1.27-alpine
+    container_name: diadema-full-nginx
+    networks: [diadema-full-net]
+    depends_on:
+      girder:
+        condition: service_healthy
+      trame:
+        condition: service_healthy
+    ports:
+      - "${NGINX_PORT:-80}:80"
+    volumes:
+      - ./nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
+    restart: unless-stopped
+
+  # ── Celery worker ───────────────────────────────────────────────────────────
+
+  celery-worker:
+    image: diadema-girder:latest
+    container_name: diadema-full-celery-worker
+    networks: [diadema-full-net]
+    <<: *worker-deps
+    environment:
+      <<: *girder-env
+    volumes:
+      - ../../:/workspace
+      - girder_data:/home/girder/.local
+    entrypoint: ["/sbin/tini", "--"]
+    command: ["bash", "/workspace/deploy/testing/entrypoint-girder.sh", "worker"]
+    user: girder
+    restart: unless-stopped
+
+  # ── MRIQC worker ────────────────────────────────────────────────────────────
+
+  mriqc-worker:
+    build:
+      context: ../../
+      dockerfile: mriqc-worker/Dockerfile
+    image: diadema-mriqc-worker:latest
+    container_name: diadema-full-mriqc-worker
+    networks: [diadema-full-net]
+    <<: *worker-deps
+    environment:
+      <<: *celery-env
+      C_FORCE_ROOT: "1"
+      GIRDER_API_URL: "http://girder:8080/api/v1"
+    volumes:
+      - ../../nifti_qc:/opt/nifti_qc
+    restart: unless-stopped
+
+  # ── DIADEMA MRIQC worker ────────────────────────────────────────────────────
+
+  diadema-mriqc-worker:
+    build:
+      context: ../../
+      dockerfile: diadema-mriqc-worker/Dockerfile
+    image: diadema-diadema-mriqc-worker:latest
+    container_name: diadema-full-diadema-mriqc-worker
+    networks: [diadema-full-net]
+    <<: *worker-deps
+    environment:
+      <<: *celery-env
+      C_FORCE_ROOT: "1"
+      GIRDER_API_URL: "http://girder:8080/api/v1"
+      DIADEMA_MRIQC_OUTPUT_DIR: /data/diadema/mriqc
+    volumes:
+      - ../../diadema_pipeline:/opt/diadema_pipeline
+      - diadema_mriqc_data:/data/diadema/mriqc
+    restart: unless-stopped
+
+  # ── FreeSurfer worker ───────────────────────────────────────────────────────
+
+  diadema-freesurfer-worker:
+    build:
+      context: ../../
+      dockerfile: freesurfer-worker/Dockerfile
+    image: diadema-freesurfer-worker:latest
+    container_name: diadema-full-freesurfer-worker
+    networks: [diadema-full-net]
+    <<: *worker-deps
+    environment:
+      <<: *celery-env
+      C_FORCE_ROOT: "1"
+      GIRDER_API_URL: "http://girder:8080/api/v1"
+      FS_LICENSE: /usr/local/freesurfer/license.txt
+      DIADEMA_SUBJECTS_DIR: /data/diadema/subjects
+    volumes:
+      - ../../diadema_pipeline:/opt/diadema_pipeline
+      - diadema_subjects_data:/data/diadema/subjects
+      - ${FREESURFER_LICENSE_PATH:-./freesurfer_license.txt}:/usr/local/freesurfer/license.txt:ro
+    restart: unless-stopped
+
+# ─────────────────────────────────────────────────────────────────────────────
+
+networks:
+  diadema-full-net:
+    driver: bridge
+    name: diadema-full-network
+
+volumes:
+  mongodb_data:
+    name: diadema-full-mongodb
+  rabbitmq_data:
+    name: diadema-full-rabbitmq
+  girder_data:
+    name: diadema-full-girder-data
+  girder_assetstore:
+    name: diadema-full-girder-assetstore
+  diadema_mriqc_data:
+    name: diadema-full-mriqc-output
+  diadema_subjects_data:
+    name: diadema-full-freesurfer-subjects
+  trame_cache:
+    name: diadema-full-trame-cache

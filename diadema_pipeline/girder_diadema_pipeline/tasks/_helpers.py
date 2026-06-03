@@ -351,6 +351,177 @@ def bids_resolve_participant_label(gc, item_id, hint=None):
     return "001"
 
 
+# ── Helper BIDS sessione ──────────────────────────────────────────────────────
+
+_BIDS_MODALITY_DATATYPE = {
+    "t1w": "anat",
+    "t2w": "anat",
+    "flair": "anat",
+    "pdw": "anat",
+    "t2star": "anat",
+    "bold": "func",
+    "dwi": "dwi",
+    "asl": "perf",
+}
+
+
+def bids_list_session_files(gc, folder_id):
+    """Elenca tutti gli item NIfTI dentro una cartella sessione BIDS (ricorsivo)."""
+    nifti_items = []
+
+    def _collect(fid):
+        items = gc.get("item", parameters={"folderId": fid, "limit": 200})
+        for item in items:
+            if item.get("name", "").lower().endswith((".nii.gz", ".nii")):
+                nifti_items.append(item)
+        subfolders = gc.get(
+            "folder",
+            parameters={"parentType": "folder", "parentId": fid, "limit": 50},
+        )
+        for sf in subfolders:
+            _collect(str(sf["_id"]))
+
+    try:
+        _collect(folder_id)
+    except Exception as exc:
+        logger.warning("[bids] bids_list_session_files fallito: %s", exc)
+    return nifti_items
+
+
+def bids_detect_modality(item_name):
+    """
+    Rileva la modalità BIDS dal nome del file NIfTI.
+    Restituisce (modality, datatype) o (None, None) se non riconosciuto.
+    Esempio: 'sub-001_ses-01_T1w.nii.gz' → ('T1w', 'anat')
+    """
+    stem = item_name
+    for ext in (".nii.gz", ".nii"):
+        if stem.lower().endswith(ext):
+            stem = stem[: -len(ext)]
+            break
+    # Prende l'ultimo componente dopo '_'
+    parts = re.split(r"[_\-]", stem)
+    for part in reversed(parts):
+        lower = part.lower()
+        if lower in _BIDS_MODALITY_DATATYPE:
+            return part, _BIDS_MODALITY_DATATYPE[lower]
+    return None, None
+
+
+def bids_find_modality_file(gc, folder_id, modality_suffix):
+    """
+    Trova il primo item NIfTI in folder_id (ricorsivo) col suffisso BIDS dato.
+    Esempio: modality_suffix='T1w' → cerca *_T1w.nii.gz o *_T1w.nii
+    Restituisce il dict item Girder, oppure None.
+    """
+    all_files = bids_list_session_files(gc, folder_id)
+    suffix_lower = f"_{modality_suffix.lower()}"
+    for item in all_files:
+        stem = item.get("name", "")
+        for ext in (".nii.gz", ".nii"):
+            if stem.lower().endswith(ext):
+                stem = stem[: -len(ext)]
+                break
+        if stem.lower().endswith(suffix_lower):
+            return item
+    return None
+
+
+def bids_resolve_session_label(gc, folder_id):
+    """
+    Rileva il BIDS session label (ses-XX) dalla cartella o dalla gerarchia.
+    Restituisce il label senza prefisso 'ses-' (es. '01'), o None.
+    """
+    try:
+        fid = folder_id
+        for _ in range(6):
+            if not fid:
+                break
+            doc = gc.get(f"folder/{fid}")
+            m = re.match(r"^ses[-_]([a-zA-Z0-9]+)$", doc.get("name", ""), re.IGNORECASE)
+            if m:
+                return m.group(1)
+            if doc.get("parentCollection", "folder") != "folder":
+                break
+            fid = str(doc.get("parentId", ""))
+    except Exception as exc:
+        logger.warning("[bids] bids_resolve_session_label fallito: %s", exc)
+    return None
+
+
+def bids_resolve_participant_label_from_folder(gc, folder_id, hint=None):
+    """
+    Determina il BIDS participant label partendo da una cartella anziché da un item.
+    Risale la gerarchia cercando sub-XXX.
+    """
+    hint = (hint or "").strip()
+    if hint:
+        if hint.lower().startswith("sub-"):
+            hint = hint[4:]
+        return re.sub(r"[^a-zA-Z0-9]", "", hint) or "001"
+    try:
+        fid = folder_id
+        for _ in range(10):
+            if not fid:
+                break
+            doc = gc.get(f"folder/{fid}")
+            m = re.match(r"^sub[-_]([a-zA-Z0-9]+)$", doc.get("name", ""), re.IGNORECASE)
+            if m:
+                return m.group(1)
+            if doc.get("parentCollection", "folder") != "folder":
+                break
+            fid = str(doc.get("parentId", ""))
+    except Exception as exc:
+        logger.warning("[bids] bids_resolve_participant_label_from_folder fallito: %s", exc)
+    return "001"
+
+
+def bids_find_dataset_root_from_folder(gc, folder_id):
+    """
+    Stima la radice del dataset BIDS risalendo la gerarchia da una cartella (non da un item).
+    Stessa logica di bids_find_dataset_root.
+    """
+    try:
+        current_id = folder_id
+        for _ in range(10):
+            desc_items = gc.get(
+                "item",
+                parameters={
+                    "folderId": current_id,
+                    "name": "dataset_description.json",
+                    "limit": 1,
+                },
+            )
+            if desc_items:
+                logger.info("[bids] Dataset root trovato: folder %s", current_id)
+                return (current_id, "folder")
+            doc = gc.get(f"folder/{current_id}")
+            parent_type = doc.get("parentCollection", "folder")
+            parent_id = str(doc.get("parentId", ""))
+            if not parent_id:
+                break
+            if parent_type == "collection":
+                logger.info("[bids] Dataset root: collection %s (fallback)", parent_id)
+                return (parent_id, "collection")
+            current_id = parent_id
+    except Exception as exc:
+        logger.warning("[bids] bids_find_dataset_root_from_folder fallito: %s", exc)
+    return (None, None)
+
+
+def update_diadema_tool_on_folder(gc, folder_id, tool_id, **data):
+    """Aggiorna i dati di elaborazione per un tool a livello di cartella sessione BIDS."""
+    try:
+        gc.put(f"diadema_pipeline/session/{folder_id}/processing/{tool_id}", json=data)
+    except Exception as exc:
+        logger.warning(
+            "[diadema] update_diadema_tool_on_folder folder=%s tool=%s fallito: %s",
+            folder_id,
+            tool_id,
+            exc,
+        )
+
+
 def bids_upload_derivative(
     gc,
     item_id,

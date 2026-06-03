@@ -11,6 +11,12 @@ set -e
 
 WORKSPACE=/workspace
 
+# pip >= 25 ha rimosso --no-use-pep517; abilitalo solo se disponibile.
+PIP_NO_PEP517_FLAG=""
+if pip install --help 2>/dev/null | grep -q -- "--no-use-pep517"; then
+    PIP_NO_PEP517_FLAG="--no-use-pep517"
+fi
+
 install_plugins() {
     echo "──── Rimozione plugin non desiderati ───────────────────────────"
     pip uninstall --break-system-packages -q -y girder-nifti-qc 2>/dev/null || true
@@ -20,8 +26,10 @@ install_plugins() {
         "$WORKSPACE/nifti_viewer" \
         "$WORKSPACE/diadema_pipeline"; do
         if [ -f "$plugin/pyproject.toml" ] || [ -f "$plugin/setup.py" ]; then
+            # Evita conflitti setuptools su riavvii ripetuti (workspace montato)
+            rm -rf "$plugin/build" "$plugin"/*.egg-info
             echo "  pip install $plugin"
-            pip install --break-system-packages -q --no-build-isolation \
+            pip install --break-system-packages -q --no-build-isolation $PIP_NO_PEP517_FLAG \
                 "$plugin"
         fi
     done

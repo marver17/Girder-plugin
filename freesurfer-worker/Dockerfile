@@ -9,7 +9,7 @@ FROM freesurfer/freesurfer:8.1.0
 #     - FS_LICENSE=/opt/freesurfer/license.txt
 #
 # Opzione B (build-time): licenza inclusa nell'immagine
-COPY freesurfer-worker/license.txt /usr/local/freesurfer/license.txt
+COPY license.txt /usr/local/freesurfer/license.txt
 # ──────────────────────────────────────────────────────────────────────────────
 
 # Dipendenze sistema: git (CentOS 7 → yum)
@@ -29,7 +29,7 @@ ENV PATH="/opt/conda/bin:$PATH"
 RUN conda install -y python=3.10 pip && conda clean -afy
 
 # Clone Girder v4-integration (stesso branch del container principale)
-RUN git clone --branch v4-integration --single-branch \
+RUN git clone  --single-branch \
     https://github.com/girder/girder.git /opt/girder
 
 # Build tools

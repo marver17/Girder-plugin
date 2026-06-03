@@ -53,7 +53,11 @@ from girder_worker.app import app
 from girder_worker.utils import girder_job
 
 from ._helpers import (
+    bids_find_dataset_root_from_folder,
+    bids_find_modality_file,
     bids_resolve_participant_label,
+    bids_resolve_participant_label_from_folder,
+    bids_resolve_session_label,
     bids_upload_derivative,
     idempotency_guard,
     kill_proc,
@@ -65,6 +69,7 @@ from ._helpers import (
     set_running,
     tool_version,
     update_diadema_tool,
+    update_diadema_tool_on_folder,
 )
 
 _DEFAULT_SUBJECTS_DIR = "/data/diadema/subjects"
@@ -219,20 +224,37 @@ def upload_freesurfer_results(task, **kwargs):
     TASK_NAME = "upload_freesurfer_results"
 
     item_id = kwargs.get("item_id")
+    session_folder_id = kwargs.get("session_folder_id")
     subject_dir_str = kwargs.get("subject_dir")
     stats = kwargs.get("stats", {})
     result_meta = kwargs.get("result_meta", {})
     keep_subjects_dir = bool(kwargs.get("keep_subjects_dir", True))
     derivatives_root_id = kwargs.get("derivatives_root_id") or None
-    participant_label = bids_resolve_participant_label(
-        gc, item_id, kwargs.get("participant_label")
-    )
+    participant_label_hint = kwargs.get("participant_label", "")
 
     girder_api_url = resolve_girder_url(task)
     girder_client_token = getattr(task.request, "girder_client_token", None)
 
     gc = GirderClient(apiUrl=girder_api_url)
     gc.token = girder_client_token
+
+    is_session = bool(session_folder_id)
+
+    if is_session:
+        participant_label = bids_resolve_participant_label_from_folder(
+            gc, session_folder_id, participant_label_hint
+        )
+    else:
+        participant_label = bids_resolve_participant_label(gc, item_id, participant_label_hint)
+
+    def _update_result(**data):
+        if is_session:
+            update_diadema_tool_on_folder(gc, session_folder_id, "freesurfer", **data)
+        else:
+            update_diadema_tool(gc, item_id, "freesurfer", **data)
+
+    # Anchor item_id per bids_upload_derivative (usato solo per risalire dataset root)
+    bids_anchor_id = item_id if not is_session else None
 
     progress = make_safe_progress(task, TASK_NAME)
     progress(
@@ -250,7 +272,7 @@ def upload_freesurfer_results(task, **kwargs):
     if log_file.exists():
         iid = bids_upload_derivative(
             gc,
-            item_id,
+            bids_anchor_id,
             log_file,
             datatype="anat",
             participant_label=participant_label,
@@ -269,7 +291,7 @@ def upload_freesurfer_results(task, **kwargs):
         for i, sf in enumerate(stat_files):
             iid = bids_upload_derivative(
                 gc,
-                item_id,
+                bids_anchor_id,
                 sf,
                 datatype="anat",
                 participant_label=participant_label,
@@ -291,7 +313,7 @@ def upload_freesurfer_results(task, **kwargs):
     try:
         iid = bids_upload_derivative(
             gc,
-            item_id,
+            bids_anchor_id,
             tmp_path,
             datatype="anat",
             participant_label=participant_label,
@@ -304,11 +326,8 @@ def upload_freesurfer_results(task, **kwargs):
     finally:
         tmp_path.unlink(missing_ok=True)
 
-    progress("Aggiornamento metadati item...", current=90)
-    update_diadema_tool(
-        gc,
-        item_id,
-        "freesurfer",
+    progress("Aggiornamento metadati...", current=90)
+    _update_result(
         results={
             **result_meta,
             "stats": stats,
@@ -354,23 +373,22 @@ def run_freesurfer_task(task, **kwargs):
     TASK_NAME = "run_freesurfer_task"
 
     # ── Parametri ─────────────────────────────────────────────────────────────
+    session_folder_id = kwargs.get("session_folder_id")
     item_id = kwargs.get("item_id")
     file_id = kwargs.get("file_id")
     file_name = kwargs.get("file_name", "unknown file")
     participant_label_hint = kwargs.get("participant_label") or ""
     directive = kwargs.get("directive", "-all").strip()
-    hemi = kwargs.get("hemi", "both")  # both | lh | rh
+    hemi = kwargs.get("hemi", "both")
     openmp_threads = int(kwargs.get("openmp_threads", 4))
     mprage = bool(kwargs.get("mprage", False))
     wsatlas = bool(kwargs.get("wsatlas", False))
     deface = bool(kwargs.get("deface", False))
-    no_isrunning = bool(
-        kwargs.get("no_isrunning", True)
-    )  # salta check "already running"
+    no_isrunning = bool(kwargs.get("no_isrunning", True))
     extra_flags = kwargs.get("extra_flags", "")
     subjects_dir_kwarg = kwargs.get("subjects_dir")
     keep_subjects_dir = bool(kwargs.get("keep_subjects_dir", True))
-    timeout = int(kwargs.get("timeout", 14400))  # 4 ore default
+    timeout = int(kwargs.get("timeout", 14400))
     derivatives_root_id = kwargs.get("derivatives_root_id") or None
     job_id = kwargs.get("job_id")
     job_token_id = kwargs.get("job_token_id")
@@ -382,18 +400,32 @@ def run_freesurfer_task(task, **kwargs):
     gc = GirderClient(apiUrl=girder_api_url)
     gc.token = girder_client_token
 
-    # Risolve participant_label: hint esplicito → filename → gerarchia folder → fallback
-    participant_label = bids_resolve_participant_label(
-        gc, item_id, participant_label_hint
-    )
+    is_session = bool(session_folder_id)
+
+    if is_session:
+        participant_label = bids_resolve_participant_label_from_folder(
+            gc, session_folder_id, participant_label_hint
+        )
+        session_label = bids_resolve_session_label(gc, session_folder_id)
+    else:
+        participant_label = bids_resolve_participant_label(gc, item_id, participant_label_hint)
+        session_label = None
+
+    def _update_status(**data):
+        if is_session:
+            update_diadema_tool_on_folder(gc, session_folder_id, "freesurfer", **data)
+        else:
+            update_diadema_tool(gc, item_id, "freesurfer", **data)
 
     if idempotency_guard(girder_api_url, job_id, job_token_id, TASK_NAME):
         return {"status": "skipped", "reason": "job already terminal"}
 
     set_running(girder_api_url, job_id, job_token_id, TASK_NAME)
     progress = make_safe_progress(task, TASK_NAME)
+
+    label_str = f"sub-{participant_label}" + (f"_ses-{session_label}" if session_label else "")
     progress(
-        f"FreeSurfer recon-all: {file_name} (sub-{participant_label})",
+        f"FreeSurfer recon-all: {label_str} ({'sessione' if is_session else file_name})",
         total=100,
         current=5,
     )
@@ -404,13 +436,7 @@ def run_freesurfer_task(task, **kwargs):
             f"Direttiva non valida: '{directive}'. "
             f"Valori ammessi: {sorted(_VALID_DIRECTIVES)}"
         )
-        update_diadema_tool(
-            gc,
-            item_id,
-            "freesurfer",
-            status="error",
-            error={"message": msg, "timestamp": now_iso()},
-        )
+        _update_status(status="error", error={"message": msg, "timestamp": now_iso()})
         raise Exception(msg)
 
     # ── SUBJECTS_DIR ──────────────────────────────────────────────────────────
@@ -421,23 +447,71 @@ def run_freesurfer_task(task, **kwargs):
         "subjects_dir",
         TASK_NAME,
     )
-    # ID soggetto univoco per item (evita conflitti tra run sullo stesso partecipante)
-    subject_id = f"diadema_{item_id[:12]}"
+    if is_session:
+        # ID soggetto basato su participant_label+session: stabile tra re-run, permette resume
+        ses_suffix = f"_{session_label}" if session_label else ""
+        subject_id = f"diadema_{participant_label}{ses_suffix}"
+    else:
+        subject_id = f"diadema_{item_id[:12]}"
     subject_dir = subjects_dir / subject_id
     # ─────────────────────────────────────────────────────────────────────────
 
+    if not derivatives_root_id and is_session:
+        root_id, _ = bids_find_dataset_root_from_folder(gc, session_folder_id)
+        if root_id:
+            derivatives_root_id = root_id
+
     with tempfile.TemporaryDirectory() as tmpdir:
+        import gzip as _gzip
+
         nifti_path = Path(tmpdir) / "input.nii.gz"
+        t2w_path = None
+        t2w_file_id = None
 
-        progress("Scaricamento file NIfTI...", current=10)
-        gc.downloadFile(file_id, str(nifti_path))
+        if is_session:
+            # Trova T1w (required) e T2w (optional) nella cartella sessione
+            progress("Ricerca file T1w nella sessione...", current=8)
+            t1w_item = bids_find_modality_file(gc, session_folder_id, "T1w")
+            if not t1w_item:
+                msg = f"Nessun file T1w trovato nella sessione {session_folder_id}"
+                _update_status(status="error", error={"message": msg, "timestamp": now_iso()})
+                raise Exception(msg)
 
-        # Comprimi se non gzip
+            t1w_files = gc.get(f"item/{t1w_item['_id']}/files", parameters={"limit": 1})
+            if not t1w_files:
+                msg = "Item T1w trovato ma senza file allegati"
+                _update_status(status="error", error={"message": msg, "timestamp": now_iso()})
+                raise Exception(msg)
+            t1w_file_id = str(t1w_files[0]["_id"])
+            file_name = t1w_item.get("name", "T1w.nii.gz")
+
+            progress(f"Scaricamento T1w: {file_name}", current=10)
+            gc.downloadFile(t1w_file_id, str(nifti_path))
+
+            # T2w opzionale
+            t2w_item = bids_find_modality_file(gc, session_folder_id, "T2w")
+            if t2w_item:
+                t2w_files = gc.get(f"item/{t2w_item['_id']}/files", parameters={"limit": 1})
+                if t2w_files:
+                    t2w_file_id = str(t2w_files[0]["_id"])
+                    t2w_path = Path(tmpdir) / "t2w.nii.gz"
+                    progress(f"Scaricamento T2w: {t2w_item.get('name', '')}", current=12)
+                    gc.downloadFile(t2w_file_id, str(t2w_path))
+                    # Comprimi T2w se necessario
+                    with open(t2w_path, "rb") as f:
+                        if f.read(2) != b"\x1f\x8b":
+                            raw = t2w_path.read_bytes()
+                            with _gzip.open(t2w_path, "wb") as gz:
+                                gz.write(raw)
+                            del raw
+        else:
+            progress("Scaricamento file NIfTI...", current=10)
+            gc.downloadFile(file_id, str(nifti_path))
+
+        # Comprimi T1w se non gzip
         with open(nifti_path, "rb") as f:
             magic = f.read(2)
         if magic != b"\x1f\x8b":
-            import gzip as _gzip
-
             progress("File non compresso, comprimo in-place...", current=12)
             raw = nifti_path.read_bytes()
             with _gzip.open(nifti_path, "wb") as gz:
@@ -457,6 +531,9 @@ def run_freesurfer_task(task, **kwargs):
             "-threads",
             str(openmp_threads),
         ]
+        # T2w opzionale per migliorare la ricostruzione della superficie piale
+        if t2w_path and t2w_path.exists():
+            cmd += ["-T2", str(t2w_path), "-T2pial"]
 
         if hemi in ("lh", "rh"):
             cmd += ["-hemi", hemi]
@@ -532,15 +609,9 @@ def run_freesurfer_task(task, **kwargs):
                     )
                     kill_proc(proc, TASK_NAME)
                     _log_thread.join(timeout=5)
-                    update_diadema_tool(
-                        gc,
-                        item_id,
-                        "freesurfer",
+                    _update_status(
                         status="cancelled",
-                        error={
-                            "message": "Job cancellato dall'utente",
-                            "timestamp": now_iso(),
-                        },
+                        error={"message": "Job cancellato dall'utente", "timestamp": now_iso()},
                     )
                     set_job_cancelled(gc, job_id, TASK_NAME)
                     raise Ignore()
@@ -560,26 +631,28 @@ def run_freesurfer_task(task, **kwargs):
 
             # ── Parse risultati ────────────────────────────────────────────
             stats = _collect_stats(subject_dir)
-            file_name = gc.get(f"file/{file_id}")["name"]
 
-            # ── Dispatch upload sub-task (asincrono) ───────────────────────
-            # Libera il worker principale durante l'upload di file potenzialmente
-            # grandi (log + .stats). Il sub-task gira sulla stessa coda "freesurfer"
-            # e ha accesso allo stesso filesystem condiviso del container.
             result_meta = {
                 "timestamp": now_iso(),
                 "freesurfer_version": tool_version("recon-all"),
                 "participant_label": participant_label,
+                "session_label": session_label,
                 "subject_id": subject_id,
                 "subjects_dir": str(subjects_dir),
                 "directive": directive,
-                "file_id": file_id,
-                "file_name": file_name,
             }
+            if is_session:
+                result_meta["session_folder_id"] = session_folder_id
+                result_meta["t2w_used"] = t2w_file_id is not None
+            else:
+                result_meta["file_id"] = file_id
+                result_meta["file_name"] = gc.get(f"file/{file_id}")["name"]
+
             progress("Avvio upload risultati in background...", current=85)
             upload_freesurfer_results.apply_async(
                 kwargs=dict(
                     item_id=item_id,
+                    session_folder_id=session_folder_id,
                     subject_dir=str(subject_dir),
                     stats=stats,
                     result_meta=result_meta,
@@ -594,26 +667,16 @@ def run_freesurfer_task(task, **kwargs):
                 queue="freesurfer",
             )
 
-            # Aggiorna lo status a "uploading" mentre il sub-task gira
-            update_diadema_tool(
-                gc,
-                item_id,
-                "freesurfer",
+            _update_status(
                 status="uploading",
-                results={
-                    **result_meta,
-                    "stats": stats,
-                },
+                results={**result_meta, "stats": stats},
             )
 
-            progress(
-                "recon-all completato! Upload statistiche avviato in background.",
-                current=100,
-            )
+            progress("recon-all completato! Upload statistiche avviato in background.", current=100)
             return {
                 "status": "uploading",
-                "item_id": item_id,
                 "subject_id": subject_id,
+                **({"session_folder_id": session_folder_id} if is_session else {"item_id": item_id}),
             }
 
         except Ignore:
@@ -622,22 +685,10 @@ def run_freesurfer_task(task, **kwargs):
         except subprocess.TimeoutExpired:
             msg = f"recon-all timeout dopo {timeout}s ({timeout // 3600}h)"
             logger.error("[%s] %s", TASK_NAME, msg)
-            update_diadema_tool(
-                gc,
-                item_id,
-                "freesurfer",
-                status="error",
-                error={"message": msg, "timestamp": now_iso()},
-            )
+            _update_status(status="error", error={"message": msg, "timestamp": now_iso()})
             raise Exception(msg)
 
         except Exception as exc:
             logger.exception("[%s] Errore non gestito: %s", TASK_NAME, exc)
-            update_diadema_tool(
-                gc,
-                item_id,
-                "freesurfer",
-                status="error",
-                error={"message": str(exc), "timestamp": now_iso()},
-            )
+            _update_status(status="error", error={"message": str(exc), "timestamp": now_iso()})
             raise

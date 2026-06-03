@@ -1,39 +1,61 @@
 """
 Task DIADEMA – LST-AI (lesion segmentation).
 
-Stato: NON IMPLEMENTATO.
-Questo stub gestisce correttamente lo stato Girder (idempotency guard, RUNNING,
-errore applicativo esplicito) senza lanciare eccezioni non gestite.
+Supporta sia item singolo (file T1 ± FLAIR espliciti) che sessione BIDS
+(ricerca automatica di T1w e FLAIR nella cartella ses-XX / sub-XX).
 
-Per implementare:
-  1. Aggiungere il Dockerfile del worker LST-AI e il servizio in docker-compose.yml
-  2. Installare `lst_ai` nel worker
-  3. Implementare il download del file T1 (e FLAIR opzionale)
-  4. Costruire il comando lst_ai e gestire il subprocess con polling cancel
-  5. Parsare i risultati (lesion_count, total_volume_ml, lesion_mask_file_id)
-  6. Impostare diadema.widget_enabled.lstai = true nelle Settings admin
+Parametri:
+  session_folder_id (str)   – ID cartella sessione BIDS [modalità sessione]
+  item_id           (str)   – ID item Girder [modalità item, backward-compat]
+  file_id           (str)   – ID file T1 NIfTI [modalità item]
+  flair_file_id     (str)   – ID file FLAIR (opzionale)
+  participant_label (str)   – BIDS participant label (auto-detect se vuoto)
+  threshold         (float) – soglia probabilità lesione 0.0–1.0 (default: 0.5)
+  use_gpu           (bool)  – usa GPU se disponibile (default: True)
+  output_base_dir   (str)   – directory output persistente
+  timeout           (int)   – secondi max (default: 3600)
+  job_id / job_token_id     – gestione stato Girder
+
+Dipendenze worker:
+  pip install lst-ai
+  (richiede anche ANTs e FSL nel PATH)
 """
 
 import logging
+import os
+import subprocess
+import tempfile
+from pathlib import Path
+
+from celery.exceptions import Ignore
+
+logger = logging.getLogger(__name__)
 
 from girder_worker.app import app
 from girder_worker.utils import girder_job
 
 from ._helpers import (
+    bids_find_dataset_root_from_folder,
+    bids_find_modality_file,
+    bids_resolve_participant_label,
+    bids_resolve_participant_label_from_folder,
+    bids_resolve_session_label,
+    bids_upload_derivative,
     idempotency_guard,
+    kill_proc,
     make_safe_progress,
     now_iso,
+    resolve_dir,
     resolve_girder_url,
+    set_job_cancelled,
     set_running,
+    tool_version,
     update_diadema_tool,
+    update_diadema_tool_on_folder,
 )
 
-logger = logging.getLogger(__name__)
-
-_NOT_IMPLEMENTED_MSG = (
-    "LST-AI non è ancora disponibile in questa installazione. "
-    "Contattare l'amministratore del sistema."
-)
+_DEFAULT_LSTAI_OUTPUT_DIR = "/data/diadema/lstai"
+_ENV_LSTAI_OUTPUT_DIR = "DIADEMA_LSTAI_OUTPUT_DIR"
 
 
 @girder_job(title="DIADEMA – LST-AI")
@@ -44,24 +66,23 @@ _NOT_IMPLEMENTED_MSG = (
     name="girder_diadema_pipeline.tasks.run_lstai_task",
 )
 def run_lstai_task(task, **kwargs):
-    """
-    Esegue LST-AI su file NIfTI (T1 ± FLAIR) per segmentazione lesioni WM.
+    import gzip as _gzip
+    import time as _time
 
-    Parametri supportati (da implementare nel backend):
-        item_id         (str)   – ID item Girder
-        file_id         (str)   – ID file T1 NIfTI
-        flair_file_id   (str)   – ID file FLAIR (opzionale, richiesto se input_type="T1+FLAIR")
-        input_type      (str)   – "T1+FLAIR" | "T1 only"   (default: "T1+FLAIR")
-        threshold       (float) – soglia probabilità lesione 0.0–1.0   (default: 0.5)
-        use_gpu         (bool)  – usa GPU se disponibile   (default: True)
-        output_base_dir (str)   – directory output persistente
-        timeout         (int)   – secondi max   (default: 3600)
-        job_id / job_token_id   – gestione stato Girder
-    """
     from girder_client import GirderClient
 
     TASK_NAME = "run_lstai_task"
+
+    session_folder_id = kwargs.get("session_folder_id")
     item_id = kwargs.get("item_id")
+    file_id = kwargs.get("file_id")
+    flair_file_id = kwargs.get("flair_file_id")
+    participant_label_hint = kwargs.get("participant_label") or ""
+    threshold = float(kwargs.get("threshold", 0.5))
+    use_gpu = bool(kwargs.get("use_gpu", True))
+    output_base_dir = kwargs.get("output_base_dir")
+    timeout = int(kwargs.get("timeout", 3600))
+    derivatives_root_id = kwargs.get("derivatives_root_id") or None
     job_id = kwargs.get("job_id")
     job_token_id = kwargs.get("job_token_id")
 
@@ -71,38 +92,250 @@ def run_lstai_task(task, **kwargs):
     gc = GirderClient(apiUrl=girder_api_url)
     gc.token = girder_client_token
 
+    is_session = bool(session_folder_id)
+
+    if is_session:
+        participant_label = bids_resolve_participant_label_from_folder(
+            gc, session_folder_id, participant_label_hint
+        )
+        session_label = bids_resolve_session_label(gc, session_folder_id)
+    else:
+        participant_label = bids_resolve_participant_label(gc, item_id, participant_label_hint)
+        session_label = None
+
+    def _update_status(**data):
+        if is_session:
+            update_diadema_tool_on_folder(gc, session_folder_id, "lstai", **data)
+        else:
+            update_diadema_tool(gc, item_id, "lstai", **data)
+
     if idempotency_guard(girder_api_url, job_id, job_token_id, TASK_NAME):
         return {"status": "skipped", "reason": "job already terminal"}
 
     set_running(girder_api_url, job_id, job_token_id, TASK_NAME)
     progress = make_safe_progress(task, TASK_NAME)
+
+    label_str = f"sub-{participant_label}" + (f"_ses-{session_label}" if session_label else "")
     progress(
-        "LST-AI: tool non ancora implementato in questa installazione.",
+        f"LST-AI: {label_str} ({'sessione' if is_session else 'item'})",
         total=100,
         current=5,
     )
 
-    logger.warning(
-        "[%s] Tentativo di eseguire un task non implementato (item_id=%s)",
+    # ── Directory di output persistente ──────────────────────────────────────
+    output_key = session_folder_id if is_session else item_id
+    output_dir = resolve_dir(
+        output_base_dir,
+        _ENV_LSTAI_OUTPUT_DIR,
+        _DEFAULT_LSTAI_OUTPUT_DIR,
+        "output_base_dir",
         TASK_NAME,
-        item_id,
-    )
+    ) / str(output_key)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    # ─────────────────────────────────────────────────────────────────────────
 
-    update_diadema_tool(
-        gc,
-        item_id,
-        "lstai",
-        status="not_implemented",
-        error={
-            "message": _NOT_IMPLEMENTED_MSG,
-            "timestamp": now_iso(),
-        },
-    )
+    if not derivatives_root_id and is_session:
+        root_id, _ = bids_find_dataset_root_from_folder(gc, session_folder_id)
+        if root_id:
+            derivatives_root_id = root_id
 
-    # Termina il job Girder con stato ERROR per segnalarlo chiaramente nell'UI
-    try:
-        gc.put(f"job/{job_id}", parameters={"status": 4})  # 4 = ERROR
-    except Exception as exc:
-        logger.warning("[%s] set ERROR non-fatal: %s", TASK_NAME, exc)
+    with tempfile.TemporaryDirectory() as tmpdir:
+        t1w_path = Path(tmpdir) / "t1w.nii.gz"
+        flair_path = None
+        actual_flair_file_id = None
 
-    return {"status": "not_implemented", "message": _NOT_IMPLEMENTED_MSG}
+        def _download_and_compress(dl_file_id, dest_path):
+            gc.downloadFile(dl_file_id, str(dest_path))
+            with open(dest_path, "rb") as f:
+                if f.read(2) != b"\x1f\x8b":
+                    raw = dest_path.read_bytes()
+                    with _gzip.open(dest_path, "wb") as gz:
+                        gz.write(raw)
+                    del raw
+
+        if is_session:
+            # ── Modalità sessione: auto-detect T1w e FLAIR ────────────────
+            progress("Ricerca T1w nella sessione...", current=8)
+            t1w_item = bids_find_modality_file(gc, session_folder_id, "T1w")
+            if not t1w_item:
+                msg = f"Nessun file T1w trovato nella sessione {session_folder_id}"
+                _update_status(status="error", error={"message": msg, "timestamp": now_iso()})
+                raise Exception(msg)
+
+            t1w_files = gc.get(f"item/{t1w_item['_id']}/files", parameters={"limit": 1})
+            if not t1w_files:
+                msg = "Item T1w trovato ma senza file allegati"
+                _update_status(status="error", error={"message": msg, "timestamp": now_iso()})
+                raise Exception(msg)
+            t1w_dl_id = str(t1w_files[0]["_id"])
+            progress(f"Scaricamento T1w: {t1w_item.get('name', '')}", current=10)
+            _download_and_compress(t1w_dl_id, t1w_path)
+
+            flair_item = bids_find_modality_file(gc, session_folder_id, "FLAIR")
+            if flair_item:
+                flair_files = gc.get(f"item/{flair_item['_id']}/files", parameters={"limit": 1})
+                if flair_files:
+                    actual_flair_file_id = str(flair_files[0]["_id"])
+                    flair_path = Path(tmpdir) / "flair.nii.gz"
+                    progress(f"Scaricamento FLAIR: {flair_item.get('name', '')}", current=13)
+                    _download_and_compress(actual_flair_file_id, flair_path)
+        else:
+            # ── Modalità item singolo ─────────────────────────────────────
+            if not file_id:
+                msg = "file_id mancante (modalità item richiede file_id)"
+                _update_status(status="error", error={"message": msg, "timestamp": now_iso()})
+                raise Exception(msg)
+            progress("Scaricamento T1w...", current=10)
+            _download_and_compress(file_id, t1w_path)
+
+            if flair_file_id:
+                actual_flair_file_id = flair_file_id
+                flair_path = Path(tmpdir) / "flair.nii.gz"
+                progress("Scaricamento FLAIR...", current=13)
+                _download_and_compress(flair_file_id, flair_path)
+
+        # ── Costruzione comando lst_ai ────────────────────────────────────
+        cmd = [
+            "lst_ai",
+            "--t1",
+            str(t1w_path),
+            "--output",
+            str(output_dir),
+            "--threshold",
+            str(threshold),
+        ]
+        if flair_path and flair_path.exists():
+            cmd += ["--flair", str(flair_path)]
+        if not use_gpu:
+            cmd.append("--no-gpu")
+
+        progress(f"Avvio LST-AI: {' '.join(cmd)}", current=15)
+
+        try:
+            env = os.environ.copy()
+            proc = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                start_new_session=True,
+                env=env,
+            )
+
+            _elapsed = 0
+            _poll_interval = 15
+
+            while proc.poll() is None:
+                _time.sleep(_poll_interval)
+                _elapsed += _poll_interval
+
+                if _elapsed >= timeout:
+                    kill_proc(proc, TASK_NAME)
+                    raise subprocess.TimeoutExpired(cmd, timeout)
+
+                pct = min(15 + int(_elapsed * 55 / timeout), 70)
+                _cancel_requested = False
+                _cancel_status = None
+                if job_id:
+                    try:
+                        _cancel_status = gc.get(f"job/{job_id}").get("status")
+                        progress(f"[poll] elapsed={_elapsed}s status={_cancel_status}", current=pct)
+                        if _cancel_status in (5, 824):
+                            _cancel_requested = True
+                    except Exception as _poll_e:
+                        logger.warning("[%s] poll status non-fatal: %s", TASK_NAME, _poll_e)
+
+                if _cancel_requested:
+                    progress(f"Cancellazione richiesta (status={_cancel_status}), termino LST-AI...", current=pct)
+                    kill_proc(proc, TASK_NAME)
+                    _update_status(
+                        status="cancelled",
+                        error={"message": "Job cancellato dall'utente", "timestamp": now_iso()},
+                    )
+                    set_job_cancelled(gc, job_id, TASK_NAME)
+                    raise Ignore()
+
+            if proc.returncode != 0:
+                raise Exception(f"LST-AI fallito (exit {proc.returncode})")
+
+            progress("LST-AI completato, raccolta risultati...", current=75)
+
+            # ── Parse risultati ────────────────────────────────────────────
+            lesion_count = None
+            total_volume_ml = None
+            lesion_mask_path = None
+
+            # lst_ai genera typicamente: lesion_mask.nii.gz, report.json
+            for f in output_dir.iterdir():
+                if "lesion" in f.name.lower() and f.suffix in (".gz", ".nii"):
+                    lesion_mask_path = f
+                if f.name.endswith(".json"):
+                    import json
+                    try:
+                        with open(f) as jf:
+                            report = json.load(jf)
+                        lesion_count = report.get("lesion_count") or report.get("n_lesions")
+                        total_volume_ml = report.get("total_volume_ml") or report.get("volume_ml")
+                    except Exception:
+                        pass
+
+            # ── Upload derivatives ─────────────────────────────────────────
+            progress("Upload risultati su Girder (BIDS derivatives)...", current=85)
+            uploaded = []
+            derivative_item_ids = []
+            bids_anchor = None if is_session else item_id
+
+            for out_file in output_dir.iterdir():
+                if out_file.is_file():
+                    iid = bids_upload_derivative(
+                        gc,
+                        bids_anchor,
+                        out_file,
+                        datatype="anat",
+                        participant_label=participant_label,
+                        derivatives_root_id=derivatives_root_id,
+                        pipeline_name="lstai",
+                    )
+                    uploaded.append(out_file.name)
+                    if iid:
+                        derivative_item_ids.append(iid)
+
+            results = {
+                "timestamp": now_iso(),
+                "lstai_version": tool_version("lst_ai"),
+                "participant_label": participant_label,
+                "session_label": session_label,
+                "threshold": threshold,
+                "flair_used": actual_flair_file_id is not None,
+                "lesion_count": lesion_count,
+                "total_volume_ml": total_volume_ml,
+                "files_uploaded": uploaded,
+                "derivative_item_ids": derivative_item_ids,
+            }
+            if not is_session:
+                results["file_id"] = file_id
+                results["flair_file_id"] = actual_flair_file_id
+            else:
+                results["session_folder_id"] = session_folder_id
+
+            _update_status(results=results, status="completed")
+            progress("LST-AI completato!", current=100)
+            return {
+                "status": "success",
+                "lesion_count": lesion_count,
+                "total_volume_ml": total_volume_ml,
+            }
+
+        except Ignore:
+            raise
+
+        except subprocess.TimeoutExpired:
+            msg = f"LST-AI timeout dopo {timeout}s"
+            logger.error("[%s] %s", TASK_NAME, msg)
+            _update_status(status="error", error={"message": msg, "timestamp": now_iso()})
+            raise Exception(msg)
+
+        except Exception as exc:
+            logger.exception("[%s] Errore non gestito: %s", TASK_NAME, exc)
+            _update_status(status="error", error={"message": str(exc), "timestamp": now_iso()})
+            raise

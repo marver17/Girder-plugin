@@ -8,6 +8,7 @@
 
 import events from '@girder/core/events';
 import { wrap } from '@girder/core/utilities/PluginUtils';
+import FolderView from '@girder/core/views/body/FolderView';
 import ItemView from '@girder/core/views/body/ItemView';
 
 import './routes';
@@ -15,11 +16,21 @@ import './routes';
 import DiademaPanel      from './views/DiademaPanel';
 import DiademaResultsWidget from './views/ResultsWidget';
 
-// ── 1. Inietta il pannello nella Item View ─────────────────────────────────────
+// ── 1a. Inietta il pannello nella Item View (item singolo) ─────────────────────
 wrap(ItemView, 'render', function (render) {
     this.once('g:rendered', () => {
         if (this.model && this.model.get('_modelType') === 'item') {
             DiademaPanel.addPanel(this);
+        }
+    });
+    return render.call(this);
+});
+
+// ── 1b. Inietta il pannello nella Folder View (sessione BIDS) ──────────────────
+wrap(FolderView, 'render', function (render) {
+    this.once('g:rendered', () => {
+        if (this.model && this.model.get('_modelType') === 'folder') {
+            DiademaPanel.addPanelToFolder(this);
         }
     });
     return render.call(this);

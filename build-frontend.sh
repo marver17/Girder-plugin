@@ -7,7 +7,7 @@
 
 set -e
 
-WORKSPACE="$(cd "$(dirname "$0")/../.." && pwd)"
+WORKSPACE="$(cd "$(dirname "$0")" && pwd)"
 
 PLUGINS=(
     "nifti_viewer"

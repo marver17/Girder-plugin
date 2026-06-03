@@ -6,7 +6,7 @@ RUN apt-get update && apt-get install -qy git && \
 
 # Clone Girder v4-integration branch (same as the main Girder container)
 # Provides: girder-client, girder-worker, girder-plugin-worker
-RUN git clone --branch v4-integration --single-branch \
+RUN git clone --single-branch \
     https://github.com/girder/girder.git /opt/girder
 
 # Build tools needed for editable installs

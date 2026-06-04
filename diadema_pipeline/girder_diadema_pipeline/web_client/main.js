@@ -6,6 +6,7 @@
  * 3. Registra la route di configurazione admin
  */
 
+import $ from 'jquery';
 import events from '@girder/core/events';
 import { wrap } from '@girder/core/utilities/PluginUtils';
 import ItemView from '@girder/core/views/body/ItemView';

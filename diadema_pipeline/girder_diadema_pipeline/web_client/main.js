@@ -66,22 +66,42 @@ events.on('g:hierarchy.route', function ({ route }) {
     }
     const folderId = match[1];
 
-    // Il breadcrumb DOM non è ancora aggiornato quando scatta questo evento,
-    // quindi usiamo la REST API per ottenere il nome della cartella.
-    restRequest({ method: 'GET', url: `folder/${folderId}` }).done((folder) => {
-        const folderName = folder.name || '';
-        console.log('[diadema] folder:', folderName, '→ isSession:', DiademaPanel._isSessionFolderName(folderName));
-
-        const existing = $('.g-diadema-panel[data-diadema-mode="session"]');
-        if (DiademaPanel._isSessionFolderName(folderName)) {
-            if (existing.data('diadema-id') === folderId) return;
-            existing.remove();
-            DiademaPanel.mountPanelByIdAndName(folderId, folderName);
-        } else {
-            existing.remove();
-        }
-    });
+    // Risale la gerarchia (max 2 livelli) finché non trova una cartella ses-XX / sub-XX.
+    // Copre il caso in cui l'utente è dentro anat/, func/, dwi/ che sono figlie di una sessione.
+    _findSessionAncestor(folderId)
+        .then(({ sessionId, sessionName }) => {
+            const existing = $('.g-diadema-panel[data-diadema-mode="session"]');
+            if (sessionId) {
+                if (existing.data('diadema-id') === sessionId) return;
+                existing.remove();
+                DiademaPanel.mountPanelByIdAndName(sessionId, sessionName);
+            } else {
+                existing.remove();
+            }
+        });
 });
+
+/**
+ * Cerca la cartella ses-XX / sub-XX più vicina risalendo la gerarchia.
+ * Controlla la cartella corrente e poi i suoi parent (max `levels` volte).
+ * Ritorna Promise<{ sessionId, sessionName }> o Promise<{ sessionId: null }>.
+ */
+function _findSessionAncestor(folderId, levels = 2) {
+    function checkFolder(id, remaining) {
+        return restRequest({ method: 'GET', url: `folder/${id}` })
+            .then(function (folder) {
+                const name = folder.name || '';
+                if (DiademaPanel._isSessionFolderName(name)) {
+                    return { sessionId: folder._id, sessionName: name };
+                }
+                if (remaining <= 0 || folder.parentCollection !== 'folder' || !folder.parentId) {
+                    return { sessionId: null, sessionName: null };
+                }
+                return checkFolder(folder.parentId, remaining - 1);
+            });
+    }
+    return checkFolder(folderId, levels).catch(() => ({ sessionId: null, sessionName: null }));
+}
 
 // ── 2. Registra il widget con nifti_viewer ─────────────────────────────────────
 

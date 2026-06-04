@@ -673,10 +673,44 @@ const DiademaPanel = {
         return view.folder || view.model;
     },
 
-    /** Controlla se la cartella corrisponde a una sessione BIDS (ses-XX o sub-XX). */
+    /** Controlla se una stringa nome corrisponde a una sessione BIDS (ses-XX o sub-XX). */
+    _isSessionFolderName(name) {
+        return /^(ses|sub)[-_][a-zA-Z0-9]+$/i.test((name || '').trim());
+    },
+
+    /** Controlla se un FolderModel corrisponde a una sessione BIDS. */
     _isSessionFolder(folderModel) {
-        const name = (folderModel && folderModel.get('name')) || '';
-        return /^(ses|sub)[-_][a-zA-Z0-9]+$/i.test(name);
+        return DiademaPanel._isSessionFolderName((folderModel && folderModel.get('name')) || '');
+    },
+
+    /**
+     * Monta il pannello DIADEMA conoscendo solo id e nome della cartella
+     * (usato da g:hierarchy.route dove non abbiamo il FolderModel completo).
+     */
+    mountPanelByIdAndName(folderId, folderName) {
+        const $panel = DiademaPanel._buildPanel({});
+        $panel.data('diadema-mode', 'session');
+        $panel.data('diadema-id', folderId);
+        $panel.find('small.text-muted').first()
+            .text(`Sessione BIDS (${folderName}) — seleziona un tool e premi Run`);
+
+        const $anchor = $('.g-hierarchy-breadcrumb-bar').first();
+        if ($anchor.length) {
+            $anchor.before($panel);
+        } else {
+            $('#g-app-body-container').prepend($panel);
+        }
+
+        // Proxy minimo: il model viene letto da $panel.data() nei metodi mode-aware
+        const proxy = {
+            folder: { id: folderId, get: (k) => k === 'name' ? folderName : k === 'diadema' ? null : undefined, set: () => {}, get diadema() { return null; } },
+            model: null,
+            $: (sel) => $panel.parent().find(sel),
+            $el: $panel.parent(),
+        };
+
+        DiademaPanel._bindEvents(proxy, $panel);
+        DiademaPanel._resumeActiveJobs(proxy, $panel);
     },
 
     /** Legge diadema.{toolId} dal modello (item o folder in base al data-diadema-mode). */
@@ -721,51 +755,20 @@ const DiademaPanel = {
      */
     mountPanelForFolder(folder) {
         if (!folder) return;
-
-        // Evita duplicati (g:navigateTo può sparare più volte)
-        if ($('.g-diadema-panel[data-diadema-mode="session"]').length) {
-            // Aggiorna ID se la cartella è cambiata
-            const existing = $('.g-diadema-panel[data-diadema-mode="session"]');
-            if (existing.data('diadema-id') !== folder.id) {
-                existing.remove();
-            } else {
-                return;
-            }
-        }
-
         const folderId   = folder.id || folder.get('_id');
         const folderName = folder.get('name') || '';
 
-        const $panel = DiademaPanel._buildPanel({});
-        $panel.data('diadema-mode', 'session');
-        $panel.data('diadema-id', folderId);
-        $panel.find('small.text-muted').first()
-            .text(`Sessione BIDS (${folderName}) — seleziona un tool e premi Run`);
+        const existing = $('.g-diadema-panel[data-diadema-mode="session"]');
+        if (existing.data('diadema-id') === folderId) return;
+        existing.remove();
 
-        // Ancora: breadcrumb bar del HierarchyWidget
-        const $anchor = $('.g-hierarchy-breadcrumb-bar').first();
-        if ($anchor.length) {
-            $anchor.before($panel);
-        } else {
-            $('#g-app-body-container').prepend($panel);
-        }
+        DiademaPanel.mountPanelByIdAndName(folderId, folderName);
 
-        // Crea un proxy view-like per riusare i metodi esistenti
-        const proxy = {
-            folder,
-            model: folder,
-            $: (sel) => $panel.parent().find(sel),
-            $el: $panel.parent(),
-        };
-
-        DiademaPanel._bindEvents(proxy, $panel);
-        DiademaPanel._resumeActiveJobs(proxy, $panel);
-
-        // Badge iniziali dallo stato già salvato (se presenti)
+        // Badge iniziali dal modello se già presenti
         const diadema = folder.get('diadema') || {};
+        const $panel = $(`.g-diadema-panel[data-diadema-id="${folderId}"]`);
         TOOLS.forEach(tool => {
-            const s = (diadema[tool.id] || {}).status || null;
-            DiademaPanel._setBadge($panel, tool.id, s);
+            DiademaPanel._setBadge($panel, tool.id, (diadema[tool.id] || {}).status || null);
         });
     },
 

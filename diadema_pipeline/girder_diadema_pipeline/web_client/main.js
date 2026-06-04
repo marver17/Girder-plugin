@@ -26,16 +26,59 @@ wrap(ItemView, 'render', function (render) {
 });
 
 // ── 1b. Inietta il pannello sulla Folder View (sessione BIDS) ──────────────────
-// In Girder 5, FolderView NON è esposta come global (girder.views.body.FolderView
-// è undefined), quindi wrap() non funziona. Intercettiamo invece l'evento
-// g:navigateTo che Girder emette ad ogni navigazione.
-events.on('g:navigateTo', function (viewClass, settings) {
-    if (!settings || !settings.folder) return;
-    const folder = settings.folder;
-    if (!DiademaPanel._isSessionFolder(folder)) return;
+//
+// Girder ha due percorsi di navigazione verso una folder:
+//
+// A) URL diretta (#folder/ID): router → FolderView.fetchAndInit → g:navigateTo
+//    con settings.folder disponibile.
+//
+// B) Click sottocartella in HierarchyWidget: router.navigate senza trigger →
+//    g:navigateTo NON viene emesso. L'unico evento è g:hierarchy.route con
+//    il route string (es. "collection/ID/folder/ID2").
+//
+// Gestiamo entrambi i casi.
 
-    // Aspettiamo che HierarchyWidget abbia reso il DOM
-    setTimeout(() => DiademaPanel.mountPanelForFolder(folder), 100);
+// Caso A: navigazione diretta via URL
+events.on('g:navigateTo', function (viewClass, settings) {
+    if (settings && settings.folder) {
+        const folder = settings.folder;
+        const name = folder.get('name') || '';
+        if (DiademaPanel._isSessionFolderName(name)) {
+            setTimeout(() => DiademaPanel.mountPanelForFolder(folder), 150);
+        } else {
+            $('.g-diadema-panel[data-diadema-mode="session"]').remove();
+        }
+    } else {
+        // Navigazione verso una vista non-folder: rimuovi panel sessione
+        $('.g-diadema-panel[data-diadema-mode="session"]').remove();
+    }
+});
+
+// Caso B: navigazione in-place nel HierarchyWidget
+// Route format: "collection/{id}/folder/{folderId}" o "folder/{id}/folder/{folderId}"
+events.on('g:hierarchy.route', function ({ route }) {
+    const match = (route || '').match(/folder\/([a-f0-9]{24})$/);
+    if (!match) {
+        $('.g-diadema-panel[data-diadema-mode="session"]').remove();
+        return;
+    }
+    const folderId = match[1];
+
+    // Aspettiamo che il breadcrumb sia aggiornato nel DOM
+    setTimeout(() => {
+        const $bar = $('.g-hierarchy-breadcrumb-bar');
+        const folderName = $bar.find('ol>li:last-child a').first().text().trim()
+                        || $bar.find('ol>li:last-child').first().text().trim();
+
+        const existing = $('.g-diadema-panel[data-diadema-mode="session"]');
+        if (DiademaPanel._isSessionFolderName(folderName)) {
+            if (existing.data('diadema-id') === folderId) return; // già montato
+            existing.remove();
+            DiademaPanel.mountPanelByIdAndName(folderId, folderName);
+        } else {
+            existing.remove();
+        }
+    }, 200);
 });
 
 // ── 2. Registra il widget con nifti_viewer ─────────────────────────────────────

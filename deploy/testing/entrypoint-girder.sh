@@ -36,7 +36,56 @@ install_plugins() {
     echo "──── Plugin installati ──────────────────────────────────────────"
 }
 
+# Compila il frontend JS di un plugin se i sorgenti sono più recenti del bundle.
+# Salta silenziosamente se il plugin non ha web_client o se npm non è disponibile.
+build_frontend_if_needed() {
+    local plugin_dir="$1"
+    local web_dir
+
+    # Cerca la web_client (schema: plugin/girder_plugin/web_client)
+    web_dir=$(find "$plugin_dir" -maxdepth 2 -name "web_client" -type d 2>/dev/null | head -1)
+    [ -z "$web_dir" ] || [ ! -f "$web_dir/package.json" ] && return 0
+
+    local dist_file
+    dist_file=$(find "$web_dir/dist" -name "*.umd.cjs" 2>/dev/null | head -1)
+
+    # Rebuild se: dist non esiste, OPPURE qualche sorgente JS è più recente del bundle
+    local needs_build=0
+    if [ -z "$dist_file" ]; then
+        needs_build=1
+    elif find "$web_dir" \
+            \( -name "*.js" -o -name "*.ts" -o -name "*.vue" \) \
+            -newer "$dist_file" \
+            -not -path "*/dist/*" \
+            -not -path "*/node_modules/*" \
+            2>/dev/null | grep -q .; then
+        needs_build=1
+    fi
+
+    if [ "$needs_build" -eq 0 ]; then
+        echo "  ✓ Frontend $(basename "$plugin_dir") già aggiornato, skip"
+        return 0
+    fi
+
+    echo "  Building frontend $(basename "$plugin_dir")..."
+    cd "$web_dir"
+    npm install --silent 2>/dev/null
+    npm run build 2>/dev/null
+    echo "  ✓ Frontend $(basename "$plugin_dir") compilato"
+}
+
+build_frontends() {
+    echo "──── Build frontend plugin ──────────────────────────────────────"
+    for plugin in \
+        "$WORKSPACE/nifti_viewer" \
+        "$WORKSPACE/diadema_pipeline"; do
+        build_frontend_if_needed "$plugin"
+    done
+    echo "──── Frontend aggiornati ────────────────────────────────────────"
+}
+
 install_plugins
+build_frontends
 
 run_bootstrap() {
     echo "──── Bootstrap Girder (settings / users / assetstore) ──────────"

@@ -804,6 +804,30 @@ const DiademaPanel = {
      * Monta il pannello DIADEMA conoscendo solo id e nome della cartella
      * (usato da g:hierarchy.route dove non abbiamo il FolderModel completo).
      */
+    /**
+     * Crea un modello sessione stateful che persiste get/set per diadema.
+     * Necessario per il corretto funzionamento di Cancel, polling e badge.
+     */
+    _makeSessionModel(folderId, folderName, initialDiadema) {
+        let _diadema = initialDiadema || {};
+        return {
+            id: folderId,
+            get(key) {
+                if (key === 'name') return folderName;
+                if (key === 'diadema') return _diadema;
+                if (key === '_id') return folderId;
+                return undefined;
+            },
+            set(key, val) {
+                if (key === 'diadema') { _diadema = val || {}; }
+                else if (typeof key === 'object' && key !== null && 'diadema' in key) {
+                    _diadema = key.diadema || {};
+                }
+            },
+            toJSON() { return { _id: folderId, name: folderName, diadema: _diadema }; },
+        };
+    },
+
     mountPanelByIdAndName(folderId, folderName) {
         const $panel = DiademaPanel._buildPanel({});
         $panel.data('diadema-mode', 'session');
@@ -818,16 +842,28 @@ const DiademaPanel = {
             $('#g-app-body-container').prepend($panel);
         }
 
-        // Proxy minimo: il model viene letto da $panel.data() nei metodi mode-aware
+        // Modello stateful: get/set reali per diadema — necessario per Cancel e polling
+        const sessionModel = DiademaPanel._makeSessionModel(folderId, folderName, {});
         const proxy = {
-            folder: { id: folderId, get: (k) => k === 'name' ? folderName : k === 'diadema' ? null : undefined, set: () => {}, get diadema() { return null; } },
-            model: null,
+            folder: sessionModel,
+            model: sessionModel,
             $: (sel) => $panel.parent().find(sel),
             $el: $panel.parent(),
         };
 
         DiademaPanel._bindEvents(proxy, $panel);
-        DiademaPanel._resumeActiveJobs(proxy, $panel);
+
+        // Carica lo stato corrente dal server (job in corso al ricaricamento pagina)
+        restRequest({ method: 'GET', url: `diadema_pipeline/session/${folderId}/results`, error: null })
+            .then(data => {
+                if (data && data.diadema) {
+                    sessionModel.set('diadema', data.diadema);
+                    DiademaPanel._refreshBadges(proxy);
+                    DiademaPanel._resumeActiveJobs(proxy, $panel);
+                    DiademaPanel._updateRunButtonState(proxy, $panel);
+                }
+            })
+            .catch(() => {});
     },
 
     /** Legge diadema.{toolId} dal modello (item o folder in base al data-diadema-mode). */

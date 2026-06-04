@@ -331,15 +331,32 @@ def upload_freesurfer_results(task, **kwargs):
         tmp_path.unlink(missing_ok=True)
 
     progress("Aggiornamento metadati...", current=90)
-    _update_result(
-        results={
-            **result_meta,
-            "stats": stats,
-            "files_uploaded": uploaded,
-            "derivative_item_ids": derivative_item_ids,
-        },
-        status="completed",
-    )
+
+    full_results = {
+        **result_meta,
+        "stats": stats,
+        "files_uploaded": uploaded,
+        "derivative_item_ids": derivative_item_ids,
+    }
+
+    _update_result(results=full_results, status="completed")
+
+    # Aggiorna anche l'item NIfTI T1w in modo che il widget NIfTI viewer
+    # possa mostrare i risultati FreeSurfer per quel file specifico
+    if is_session:
+        t1w_file_id = result_meta.get("file_id") or kwargs.get("t1w_file_id")
+        if not t1w_file_id and "session_folder_id" in result_meta:
+            # Cerca il T1w dalla sessione per trovare l'item
+            try:
+                t1w_item = bids_find_modality_file(gc, result_meta["session_folder_id"], "T1w")
+                if t1w_item:
+                    update_diadema_tool(
+                        gc, str(t1w_item["_id"]), "freesurfer",
+                        status="completed",
+                        results=full_results,
+                    )
+            except Exception as _e:
+                logger.warning("[%s] update item T1w non-fatal: %s", TASK_NAME, _e)
 
     # Pulizia directory soggetto (opzionale)
     if not keep_subjects_dir:

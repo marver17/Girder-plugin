@@ -8,6 +8,7 @@
 
 import $ from 'jquery';
 import events from '@girder/core/events';
+import { restRequest } from '@girder/core/rest';
 import { wrap } from '@girder/core/utilities/PluginUtils';
 import ItemView from '@girder/core/views/body/ItemView';
 
@@ -58,7 +59,6 @@ events.on('g:navigateTo', function (viewClass, settings) {
 // Caso B: navigazione in-place nel HierarchyWidget
 // Route format: "collection/{id}/folder/{folderId}" o "folder/{id}/folder/{folderId}"
 events.on('g:hierarchy.route', function ({ route }) {
-    console.log('[diadema] g:hierarchy.route:', route);
     const match = (route || '').match(/folder\/([a-f0-9]{24})$/);
     if (!match) {
         $('.g-diadema-panel[data-diadema-mode="session"]').remove();
@@ -66,11 +66,11 @@ events.on('g:hierarchy.route', function ({ route }) {
     }
     const folderId = match[1];
 
-    setTimeout(() => {
-        const $bar = $('.g-hierarchy-breadcrumb-bar');
-        const folderName = $bar.find('ol>li:last-child a').first().text().trim()
-                        || $bar.find('ol>li:last-child').first().text().trim();
-        console.log('[diadema] folder rilevata:', folderName, 'isSession:', DiademaPanel._isSessionFolderName(folderName));
+    // Il breadcrumb DOM non è ancora aggiornato quando scatta questo evento,
+    // quindi usiamo la REST API per ottenere il nome della cartella.
+    restRequest({ method: 'GET', url: `folder/${folderId}` }).done((folder) => {
+        const folderName = folder.name || '';
+        console.log('[diadema] folder:', folderName, '→ isSession:', DiademaPanel._isSessionFolderName(folderName));
 
         const existing = $('.g-diadema-panel[data-diadema-mode="session"]');
         if (DiademaPanel._isSessionFolderName(folderName)) {
@@ -80,7 +80,7 @@ events.on('g:hierarchy.route', function ({ route }) {
         } else {
             existing.remove();
         }
-    }, 200);
+    });
 });
 
 // ── 2. Registra il widget con nifti_viewer ─────────────────────────────────────

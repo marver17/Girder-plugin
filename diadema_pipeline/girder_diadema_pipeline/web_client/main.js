@@ -77,11 +77,12 @@ events.on('g:hierarchy.route', function ({ route }) {
 });
 
 /**
- * Cerca la cartella ses-XX / sub-XX più vicina risalendo la gerarchia.
+ * Cerca la cartella ses-XX più vicina risalendo la gerarchia BIDS.
  * Controlla la cartella corrente e poi i suoi parent (max `levels` volte).
+ * Il pannello appare solo a partire dal livello ses-XX (non sub-XX).
  * Ritorna Promise<{ sessionId, sessionName }> o Promise<{ sessionId: null }>.
  */
-function _findSessionAncestor(folderId, levels = 2) {
+function _findSessionAncestor(folderId, levels = 3) {
     function checkFolder(id, remaining) {
         return restRequest({ method: 'GET', url: `folder/${id}` })
             .then(function (folder) {
@@ -89,7 +90,11 @@ function _findSessionAncestor(folderId, levels = 2) {
                 if (DiademaPanel._isSessionFolderName(name)) {
                     return { sessionId: folder._id, sessionName: name };
                 }
-                if (remaining <= 0 || folder.parentCollection !== 'folder' || !folder.parentId) {
+                // Fermati se raggiungiamo la radice o il livello sub-XX
+                if (remaining <= 0
+                    || folder.parentCollection !== 'folder'
+                    || !folder.parentId
+                    || /^sub[-_][a-zA-Z0-9]+$/i.test(name)) {
                     return { sessionId: null, sessionName: null };
                 }
                 return checkFolder(folder.parentId, remaining - 1);

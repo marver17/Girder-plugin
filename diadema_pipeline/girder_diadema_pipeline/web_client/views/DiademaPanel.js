@@ -790,9 +790,9 @@ const DiademaPanel = {
         return view.folder || view.model;
     },
 
-    /** Controlla se una stringa nome corrisponde a una sessione BIDS (ses-XX o sub-XX). */
+    /** Controlla se una stringa nome corrisponde a una sessione BIDS (es. ses-01). */
     _isSessionFolderName(name) {
-        return /^(ses|sub)[-_][a-zA-Z0-9]+$/i.test((name || '').trim());
+        return /^ses[-_][a-zA-Z0-9]+$/i.test((name || '').trim());
     },
 
     /** Controlla se un FolderModel corrisponde a una sessione BIDS. */

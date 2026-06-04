@@ -27,13 +27,13 @@ wrap(ItemView, 'render', function (render) {
 });
 
 // ── 1b. Inietta il pannello nella Folder View (sessione BIDS) ──────────────────
+// FolderView.render() NON emette 'g:rendered' (crea solo un HierarchyWidget),
+// quindi chiamiamo addPanelToFolder direttamente dopo il render.
+// FolderView usa this.folder (non this.model) per il modello corrente.
 wrap(FolderView, 'render', function (render) {
-    this.once('g:rendered', () => {
-        if (this.model && this.model.get('_modelType') === 'folder') {
-            DiademaPanel.addPanelToFolder(this);
-        }
-    });
-    return render.call(this);
+    const result = render.call(this);
+    DiademaPanel.addPanelToFolder(this);
+    return result;
 });
 
 // ── 2. Registra il widget con nifti_viewer ─────────────────────────────────────

@@ -116,11 +116,12 @@ const DiademaPanel = {
     // ── Riprende il polling per i job attivi al (ri)caricamento della pagina ──
 
     _resumeActiveJobs(view, $panel) {
-        const mode = $panel.data('diadema-mode') || 'item';
-        const id   = $panel.data('diadema-id') || view.model.id;
+        const mode  = $panel.data('diadema-mode') || 'item';
+        const id    = $panel.data('diadema-id') || DiademaPanel._getViewModel(view)?.id;
+        const model = DiademaPanel._getViewModel(view);
         const ACTIVE = ['running', 'queued', 'processing'];
         TOOLS.forEach(tool => {
-            const { status } = DiademaPanel._getToolMetaFromModel(view.model, tool, mode);
+            const { status } = DiademaPanel._getToolMetaFromModel(model, tool, mode);
             if (ACTIVE.includes(status)) {
                 DiademaPanel._pollForResults(view, $panel, id, tool.id, 8000, mode);
             }
@@ -131,11 +132,12 @@ const DiademaPanel = {
     // ── Aggiorna il bottone Run in base allo stato del tool selezionato ───────
 
     _updateRunButtonState(view, $panel) {
-        const mode = $panel.data('diadema-mode') || 'item';
+        const mode  = $panel.data('diadema-mode') || 'item';
+        const model = DiademaPanel._getViewModel(view);
         const ACTIVE = ['running', 'queued', 'processing', 'uploading', 'cancelling'];
         const CANCELLABLE = ['running', 'queued', 'processing', 'uploading'];
         const tool = DiademaPanel._getSelectedTool($panel);
-        const { status } = DiademaPanel._getToolMetaFromModel(view.model, tool, mode);
+        const { status } = DiademaPanel._getToolMetaFromModel(model, tool, mode);
         const $btn = $panel.find('.g-diadema-run-btn');
         const $cancelBtn = $panel.find('.g-diadema-cancel-btn');
         const $resetBtn = $panel.find('.g-diadema-reset-btn');
@@ -363,7 +365,7 @@ const DiademaPanel = {
     _refreshParticipantLabelPreview(view, $form, hint) {
         const $panel = view.$('.g-diadema-panel');
         const mode = ($panel.length && $panel.data('diadema-mode')) || 'item';
-        const itemId = ($panel.length && $panel.data('diadema-id')) || view.model.id;
+        const itemId = ($panel.length && $panel.data('diadema-id')) || DiademaPanel._getViewModel(view)?.id;
         const $text = $form.find('.g-participant-label-text');
         if (!$text.length) return;
 
@@ -583,7 +585,7 @@ const DiademaPanel = {
 
     _onForceReset(view, $panel) {
         const mode = $panel.data('diadema-mode') || 'item';
-        const id   = $panel.data('diadema-id') || view.model.id;
+        const id   = $panel.data('diadema-id') || DiademaPanel._getViewModel(view)?.id;
         const tool = DiademaPanel._getSelectedTool($panel);
 
         // eslint-disable-next-line no-alert
@@ -603,9 +605,9 @@ const DiademaPanel = {
                 type: 'success',
                 timeout: 4000,
             });
-            const curDiadema = Object.assign({}, view.model.get('diadema') || {});
+            const curDiadema = Object.assign({}, DiademaPanel._getViewModel(view).get('diadema') || {});
             curDiadema[tool.id] = Object.assign({}, curDiadema[tool.id] || {}, { status: 'cancelled' });
-            view.model.set('diadema', curDiadema);
+            DiademaPanel._getViewModel(view).set('diadema', curDiadema);
             DiademaPanel._setBadge($panel, tool.id, 'cancelled');
             DiademaPanel._updateRunButtonState(view, $panel);
         }).fail(err => {
@@ -624,7 +626,7 @@ const DiademaPanel = {
 
     _onCancel(view, $panel) {
         const mode = $panel.data('diadema-mode') || 'item';
-        const id   = $panel.data('diadema-id') || view.model.id;
+        const id   = $panel.data('diadema-id') || DiademaPanel._getViewModel(view)?.id;
         const tool = DiademaPanel._getSelectedTool($panel);
         const $cancelBtn = $panel.find('.g-diadema-cancel-btn');
 
@@ -644,9 +646,9 @@ const DiademaPanel = {
                 type: 'warning',
                 timeout: 5000,
             });
-            const curDiadema = Object.assign({}, view.model.get('diadema') || {});
+            const curDiadema = Object.assign({}, DiademaPanel._getViewModel(view).get('diadema') || {});
             curDiadema[tool.id] = Object.assign({}, curDiadema[tool.id] || {}, { status: 'cancelling' });
-            view.model.set('diadema', curDiadema);
+            DiademaPanel._getViewModel(view).set('diadema', curDiadema);
             DiademaPanel._setBadge($panel, tool.id, 'cancelling');
             DiademaPanel._updateRunButtonState(view, $panel);
         }).fail(err => {
@@ -663,14 +665,23 @@ const DiademaPanel = {
 
     // ── Helper mode (item vs sessione BIDS) ──────────────────────────────────
 
+    /**
+     * Restituisce il modello Backbone corretto per la view.
+     * FolderView usa this.folder (non this.model come ItemView).
+     */
+    _getViewModel(view) {
+        return view.folder || view.model;
+    },
+
     /** Controlla se la cartella corrisponde a una sessione BIDS (ses-XX o sub-XX). */
-    _isSessionFolder(folder) {
-        const name = folder.get('name') || '';
+    _isSessionFolder(folderModel) {
+        const name = (folderModel && folderModel.get('name')) || '';
         return /^(ses|sub)[-_][a-zA-Z0-9]+$/i.test(name);
     },
 
     /** Legge diadema.{toolId} dal modello (item o folder in base al data-diadema-mode). */
     _getToolMetaFromModel(model, tool, mode) {
+        if (!model) return { status: null, results: null };
         let diadema;
         if (mode === 'session') {
             diadema = model.get('diadema') || {};
@@ -704,7 +715,8 @@ const DiademaPanel = {
     // ── Entry point FolderView ────────────────────────────────────────────────
 
     addPanelToFolder(folderView) {
-        const folder = folderView.model;
+        // FolderView usa this.folder, non this.model
+        const folder = DiademaPanel._getViewModel(folderView);
         if (!folder) return;
         if (!DiademaPanel._isSessionFolder(folder)) return;
         if (folderView.$('.g-diadema-panel').length) {
@@ -717,19 +729,21 @@ const DiademaPanel = {
     _mountPanelOnFolder(folderView) {
         if (folderView.$('.g-diadema-panel').length) return;
 
+        const folder = DiademaPanel._getViewModel(folderView);
         const $panel = DiademaPanel._buildPanel(folderView);
         $panel.data('diadema-mode', 'session');
-        $panel.data('diadema-id', folderView.model.id);
-        // Etichetta sessione nel sottotitolo
-        const folderName = folderView.model.get('name') || '';
+        $panel.data('diadema-id', folder.id);
+
+        const folderName = folder.get('name') || '';
         $panel.find('small.text-muted').first()
             .text(`Sessione BIDS (${folderName}) — seleziona un tool e premi Run`);
 
-        const $anchor = folderView.$('.g-folder-info');
+        // HierarchyWidget usa .g-hierarchy-breadcrumb-bar come primo elemento
+        const $anchor = folderView.$('.g-hierarchy-breadcrumb-bar');
         if ($anchor.length) {
-            $anchor.after($panel);
+            $anchor.before($panel);
         } else {
-            folderView.$el.find('.g-folder-header, .panel-body').first().append($panel);
+            folderView.$el.prepend($panel);
         }
 
         DiademaPanel._bindEvents(folderView, $panel);
@@ -741,12 +755,12 @@ const DiademaPanel = {
 
     _onRun(view, $panel) {
         const mode = $panel.data('diadema-mode') || 'item';
-        const id   = $panel.data('diadema-id') || view.model.id;
+        const id   = $panel.data('diadema-id') || DiademaPanel._getViewModel(view)?.id;
         const tool = DiademaPanel._getSelectedTool($panel);
         const $runBtn = $panel.find('.g-diadema-run-btn');
 
         const ACTIVE = ['running', 'queued', 'processing'];
-        const { status, results } = DiademaPanel._getToolMetaFromModel(view.model, tool, mode);
+        const { status, results } = DiademaPanel._getToolMetaFromModel(DiademaPanel._getViewModel(view), tool, mode);
 
         if (ACTIVE.includes(status)) {
             events.trigger('g:alert', {
@@ -783,9 +797,9 @@ const DiademaPanel = {
                 timeout: 5000,
             });
 
-            const curDiadema = Object.assign({}, view.model.get('diadema') || {});
+            const curDiadema = Object.assign({}, DiademaPanel._getViewModel(view).get('diadema') || {});
             curDiadema[tool.id] = Object.assign({}, curDiadema[tool.id] || {}, { status: 'queued' });
-            view.model.set('diadema', curDiadema);
+            DiademaPanel._getViewModel(view).set('diadema', curDiadema);
 
             DiademaPanel._setBadge($panel, tool.id, 'queued');
             DiademaPanel._pollForResults(view, $panel, id, tool.id, 15000, mode);
@@ -823,9 +837,9 @@ const DiademaPanel = {
                 if (status) DiademaPanel._setBadge($panel, toolId, status);
 
                 if (status === 'completed') {
-                    const curDia = Object.assign({}, view.model.get('diadema') || {});
+                    const curDia = Object.assign({}, DiademaPanel._getViewModel(view).get('diadema') || {});
                     curDia[toolId] = Object.assign({}, curDia[toolId] || {}, { status, results });
-                    view.model.set('diadema', curDia);
+                    DiademaPanel._getViewModel(view).set('diadema', curDia);
                     events.trigger('g:alert', {
                         icon: 'ok',
                         text: `${tool.label} completato!`,
@@ -841,9 +855,9 @@ const DiademaPanel = {
                         type: 'warning',
                         timeout: 4000,
                     });
-                    const curDia = Object.assign({}, view.model.get('diadema') || {});
+                    const curDia = Object.assign({}, DiademaPanel._getViewModel(view).get('diadema') || {});
                     curDia[toolId] = Object.assign({}, curDia[toolId] || {}, { status: 'cancelled' });
-                    view.model.set('diadema', curDia);
+                    DiademaPanel._getViewModel(view).set('diadema', curDia);
                     DiademaPanel._updateRunButtonState(view, $panel);
 
                 } else if (status === 'error') {
@@ -854,9 +868,9 @@ const DiademaPanel = {
                         type: 'danger',
                         timeout: 6000,
                     });
-                    const curDia = Object.assign({}, view.model.get('diadema') || {});
+                    const curDia = Object.assign({}, DiademaPanel._getViewModel(view).get('diadema') || {});
                     curDia[toolId] = Object.assign({}, curDia[toolId] || {}, { status: 'error' });
-                    view.model.set('diadema', curDia);
+                    DiademaPanel._getViewModel(view).set('diadema', curDia);
                     DiademaPanel._updateRunButtonState(view, $panel);
 
                 } else if (pollCount < maxPolls) {
@@ -882,9 +896,10 @@ const DiademaPanel = {
     _refreshBadges(view) {
         const $panel = view.$('.g-diadema-panel');
         if (!$panel.length) return;
-        const mode = $panel.data('diadema-mode') || 'item';
+        const mode  = $panel.data('diadema-mode') || 'item';
+        const model = DiademaPanel._getViewModel(view);
         TOOLS.forEach(tool => {
-            const { status } = DiademaPanel._getToolMetaFromModel(view.model, tool, mode);
+            const { status } = DiademaPanel._getToolMetaFromModel(model, tool, mode);
             DiademaPanel._setBadge($panel, tool.id, status || null);
         });
     },

@@ -292,8 +292,9 @@ const DiademaPanel = {
 
     _renderParamForm(itemView, $panel, tool) {
         const $form = $panel.find('.g-diadema-params-form');
+        const model = DiademaPanel._getViewModel(itemView);
         const autoValues = tool.id === 'mriqc'
-            ? DiademaPanel._inferMRIQCParams(itemView.model)
+            ? DiademaPanel._inferMRIQCParams(model)
             : {};
 
         const fields = tool.params.map(param => {
@@ -515,10 +516,20 @@ const DiademaPanel = {
         });
     },
 
-    _refreshDerivativesPreview(itemView, $form, overrideId) {
-        const itemId = itemView.model.id;
+    _refreshDerivativesPreview(view, $form, overrideId) {
+        const $panel = $form.closest('.g-diadema-advanced-panel').closest('.g-diadema-panel');
+        const mode   = ($panel.length && $panel.data('diadema-mode')) || 'item';
+        const itemId = ($panel.length && $panel.data('diadema-id')) || DiademaPanel._getViewModel(view)?.id;
+        if (!itemId) return;
+
         const $pathText = $form.find('.g-deriv-path-text');
         const $warning  = $form.find('.g-deriv-warning');
+
+        // In session mode, il derivatives_root si risolve dalla session label — skip
+        if (mode === 'session') {
+            $pathText.html('<span class="text-muted">Auto-rilevato dalla sessione BIDS</span>');
+            return;
+        }
 
         $pathText.html('<i class="icon-spin3 animate-spin"></i> Calcolo percorso…');
         $warning.hide();

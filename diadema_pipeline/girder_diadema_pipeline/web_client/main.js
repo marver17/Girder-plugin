@@ -40,36 +40,30 @@ wrap(ItemView, 'render', function (render) {
 //
 // Gestiamo entrambi i casi.
 
-// Caso A: navigazione diretta via URL
-events.on('g:navigateTo', function (viewClass, settings) {
-    if (settings && settings.folder) {
-        const folder = settings.folder;
-        const name = folder.get('name') || '';
-        console.log('[diadema] g:navigateTo folder:', name);
-        if (DiademaPanel._isSessionFolderName(name)) {
-            setTimeout(() => DiademaPanel.mountPanelForFolder(folder), 150);
-        } else {
-            $('.g-diadema-panel[data-diadema-mode="session"]').remove();
-        }
-    } else {
-        $('.g-diadema-panel[data-diadema-mode="session"]').remove();
-    }
-});
-
-// Caso B: navigazione in-place nel HierarchyWidget
+// Gestione navigazione folder: unico listener su g:hierarchy.route.
+// g:navigateTo non viene usato per le folder perché causa duplicati in
+// race condition con g:hierarchy.route (entrambi scattano per URL diretta).
+//
 // Route format: "collection/{id}/folder/{folderId}" o "folder/{id}/folder/{folderId}"
+let _sessionMountInFlight = false;
+
 events.on('g:hierarchy.route', function ({ route }) {
     const match = (route || '').match(/folder\/([a-f0-9]{24})$/);
     if (!match) {
+        _sessionMountInFlight = false;
         $('.g-diadema-panel[data-diadema-mode="session"]').remove();
         return;
     }
     const folderId = match[1];
 
-    // Risale la gerarchia (max 2 livelli) finché non trova una cartella ses-XX / sub-XX.
-    // Copre il caso in cui l'utente è dentro anat/, func/, dwi/ che sono figlie di una sessione.
+    // Evita chiamate REST parallele (l'evento scatta a volte due volte di fila)
+    if (_sessionMountInFlight) return;
+    _sessionMountInFlight = true;
+
+    // Risale la gerarchia (max 2 livelli) finché non trova ses-XX / sub-XX.
     _findSessionAncestor(folderId)
         .then(({ sessionId, sessionName }) => {
+            _sessionMountInFlight = false;
             const existing = $('.g-diadema-panel[data-diadema-mode="session"]');
             if (sessionId) {
                 if (existing.data('diadema-id') === sessionId) return;
@@ -78,7 +72,8 @@ events.on('g:hierarchy.route', function ({ route }) {
             } else {
                 existing.remove();
             }
-        });
+        })
+        .catch(() => { _sessionMountInFlight = false; });
 });
 
 /**

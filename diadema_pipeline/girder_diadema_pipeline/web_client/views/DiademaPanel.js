@@ -331,6 +331,19 @@ const DiademaPanel = {
                 </div>
             </div>` : '';
 
+        const mode = $panel.data('diadema-mode') || 'item';
+        const sessionFilesSection = mode === 'session' ? `
+            <div class="g-diadema-session-files" style="
+                margin-top: 12px; padding: 8px 10px; border-radius: 4px;
+                background: #fdf8f0; border: 1px solid #e8d5a0; font-size: 12px;">
+                <div style="font-weight: 600; color: #7a5a00; margin-bottom: 6px;">
+                    <i class="icon-docs"></i> File nella sessione
+                </div>
+                <div class="g-session-files-content">
+                    <i class="icon-spin3 animate-spin"></i> Caricamento file…
+                </div>
+            </div>` : '';
+
         $form.html(`
             <div style="padding-bottom: 4px; margin-bottom: 10px; border-bottom: 1px solid #eee;">
                 <strong style="font-size: 13px; color: #555;">
@@ -338,12 +351,18 @@ const DiademaPanel = {
                 </strong>
                 ${tool.workerNote ? `<br><small class="text-muted" style="font-size: 11px;">🐳 ${tool.workerNote}</small>` : ''}
             </div>
+            ${sessionFilesSection}
             <div class="form-horizontal" style="font-size: 13px;">
                 ${fields}
             </div>
             ${derivativesPreview}
             ${participantPreview}
         `);
+
+        if (mode === 'session') {
+            const folderId = $panel.data('diadema-id');
+            DiademaPanel._loadSessionFiles(folderId, tool, $form);
+        }
 
         // Preview iniziale e aggiornamento live su modifica del campo
         if (tool.id === 'mriqc') {
@@ -360,6 +379,91 @@ const DiademaPanel = {
                 DiademaPanel._refreshParticipantLabelPreview(itemView, $form, $(this).val().trim());
             });
         }
+    },
+
+    // ── File selector per modalità sessione ───────────────────────────────────
+
+    _loadSessionFiles(folderId, tool, $form) {
+        const $content = $form.find('.g-session-files-content');
+        restRequest({ method: 'GET', url: `diadema_pipeline/session/${folderId}/files`, error: null })
+            .then(data => {
+                const files = data.files || [];
+                if (!files.length) {
+                    $content.html('<span class="text-muted">Nessun file NIfTI trovato nella sessione.</span>');
+                    return;
+                }
+                $content.html(DiademaPanel._buildSessionFilesHTML(tool.id, files));
+            })
+            .catch(() => {
+                $content.html('<span class="text-danger">Errore nel caricamento dei file.</span>');
+            });
+    },
+
+    _buildSessionFilesHTML(toolId, files) {
+        if (toolId === 'mriqc') {
+            // Checkbox per ogni file NIfTI
+            const rows = files.map(f => `
+                <label style="display:flex;align-items:center;gap:6px;margin-bottom:4px;font-weight:normal;cursor:pointer;">
+                    <input type="checkbox" class="g-session-file-check"
+                           data-file-id="${f.file_id || ''}"
+                           data-modality="${f.modality || '?'}"
+                           ${f.file_id ? 'checked' : 'disabled'}>
+                    <span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;"
+                          title="${f.name}">${f.name}</span>
+                    <span class="label label-default" style="font-size:10px;flex-shrink:0;">
+                        ${f.modality || '?'}
+                    </span>
+                </label>`).join('');
+            return `<div style="max-height:140px;overflow-y:auto;">${rows}</div>
+                    <small class="text-muted">Deseleziona i file che non vuoi processare.</small>`;
+        }
+
+        // FreeSurfer / LST-AI: select per ogni modalità richiesta/opzionale
+        const modalities = toolId === 'freesurfer'
+            ? [{ key: 't1wFileId', label: 'T1w', required: true }, { key: 't2wFileId', label: 'T2w', required: false }]
+            : [{ key: 't1wFileId', label: 'T1w', required: true }, { key: 'flairFileId', label: 'FLAIR', required: false }];
+
+        return modalities.map(({ key, label, required }) => {
+            const matching = files.filter(f => f.modality && f.modality.toLowerCase() === label.toLowerCase());
+            const options = [
+                required ? '' : '<option value="">— nessuno —</option>',
+                ...files.map(f => {
+                    const sel = matching.length > 0 && f.file_id === matching[0].file_id ? 'selected' : '';
+                    return `<option value="${f.file_id || ''}" ${sel}>${f.name}</option>`;
+                }),
+            ].join('');
+            return `
+                <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;">
+                    <span style="width:54px;font-weight:600;color:${required ? '#c0392b' : '#555'};">
+                        ${label}${required ? ' *' : ''}
+                    </span>
+                    <select class="form-control" data-session-file="${key}" style="flex:1;height:28px;padding:2px 6px;font-size:12px;">
+                        ${options}
+                    </select>
+                </div>`;
+        }).join('');
+    },
+
+    _collectSessionFileOverrides($panel) {
+        const $adv = $panel.find('.g-diadema-advanced-panel');
+        const overrides = {};
+
+        // MRIQC: checkbox
+        const checked = [];
+        $adv.find('.g-session-file-check:checked').each(function () {
+            const fid = $(this).data('file-id');
+            if (fid) checked.push(fid);
+        });
+        if (checked.length) overrides.selectedFileIds = checked.join(',');
+
+        // FreeSurfer / LST-AI: select
+        $adv.find('[data-session-file]').each(function () {
+            const key = $(this).data('session-file');
+            const val = $(this).val();
+            if (val) overrides[key] = val;
+        });
+
+        return overrides;
     },
 
     _refreshParticipantLabelPreview(view, $form, hint) {
@@ -513,7 +617,6 @@ const DiademaPanel = {
         const params = {};
 
         if ($adv.is(':visible')) {
-            // Legge i valori dal form
             $adv.find('[data-param]').each(function () {
                 const name = $(this).data('param');
                 const type = $(this).attr('type');
@@ -523,12 +626,15 @@ const DiademaPanel = {
                     params[name] = $(this).val();
                 }
             });
+            // Aggiungi override file (solo session mode)
+            if ($panel.data('diadema-mode') === 'session') {
+                Object.assign(params, DiademaPanel._collectSessionFileOverrides($panel));
+            }
         } else {
-            // Usa i default (con auto-detect per MRIQC)
             const autoValues = tool.id === 'mriqc'
                 ? DiademaPanel._inferMRIQCParams(
                     $panel.closest('.g-item-view, .g-item-info').data('view')?.model
-                    ?? { toJSON: () => ({}) }  // fallback
+                    ?? { toJSON: () => ({}) }
                   )
                 : {};
             tool.params.forEach(p => {

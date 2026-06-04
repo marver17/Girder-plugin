@@ -77,6 +77,7 @@ class DiademaResource(Resource):
         self.route("PUT", ("session", ":folderId", "processing", ":toolId"), self.updateSessionProcessing)
         self.route("GET", ("session", ":folderId", "results"), self.getSessionResults)
         self.route("GET", ("session", ":folderId", "participant_label"), self.resolveSessionParticipantLabel)
+        self.route("GET", ("session", ":folderId", "files"), self.getSessionFiles)
 
     @access.user(scope=TokenScope.DATA_WRITE)
     @autoDescribeRoute(
@@ -890,6 +891,11 @@ class DiademaResource(Resource):
             default="",
         )
         .param("force", "Forza riesecuzione", required=False, dataType="boolean", default=False)
+        # Override file espliciti (opzionali — se vuoti usa auto-detect dalla sessione)
+        .param("t1wFileId", "ID file T1w (override auto-detect, FreeSurfer/LST-AI)", required=False, default="")
+        .param("t2wFileId", "ID file T2w (override auto-detect, FreeSurfer)", required=False, default="")
+        .param("flairFileId", "ID file FLAIR (override auto-detect, LST-AI)", required=False, default="")
+        .param("selectedFileIds", "ID file selezionati (CSV, override auto-detect, MRIQC)", required=False, default="")
         .errorResponse("Tool non supportato", 400)
         .errorResponse("Job già in corso per questa sessione/tool", 409)
         .errorResponse("Cartella non trovata", 404)
@@ -918,6 +924,10 @@ class DiademaResource(Resource):
         useGpu,
         derivativesRootId,
         force,
+        t1wFileId,
+        t2wFileId,
+        flairFileId,
+        selectedFileIds,
         params,
     ):
         if toolId not in _TOOL_CONFIG:
@@ -945,10 +955,13 @@ class DiademaResource(Resource):
         if toolId == "mriqc":
             from .tasks import run_mriqc_task as celery_task
 
+            # selectedFileIds: CSV di file ID → override auto-detect (es. "id1,id2")
+            selected_ids = [f.strip() for f in (selectedFileIds or "").split(",") if f.strip()]
             task_kwargs = dict(
                 session_folder_id=str(folder["_id"]),
                 participant_label=participantLabel,
                 modality_filter=modality or "",
+                selected_file_ids=selected_ids or None,
                 timeout=timeout,
                 output_base_dir=outputBaseDir or _settings_mriqc_dir or None,
                 keep_work_dir=keepWorkDir,
@@ -960,6 +973,8 @@ class DiademaResource(Resource):
             task_kwargs = dict(
                 session_folder_id=str(folder["_id"]),
                 participant_label=participantLabel,
+                override_t1w_file_id=t1wFileId or None,
+                override_t2w_file_id=t2wFileId or None,
                 directive=directive,
                 hemi=hemi,
                 openmp_threads=openmpThreads,
@@ -983,6 +998,8 @@ class DiademaResource(Resource):
             task_kwargs = dict(
                 session_folder_id=str(folder["_id"]),
                 participant_label=participantLabel,
+                override_t1w_file_id=t1wFileId or None,
+                override_flair_file_id=flairFileId or None,
                 threshold=threshold,
                 use_gpu=useGpu,
                 output_base_dir=_settings_lstai_dir or None,
@@ -1115,6 +1132,57 @@ class DiademaResource(Resource):
             "subject_id": f"sub-{label}",
             "session_label": session,
             "session_id": f"ses-{session}" if session else None,
+        }
+
+    @access.user(scope=TokenScope.DATA_READ)
+    @autoDescribeRoute(
+        Description(
+            "Elenca i file NIfTI nella sessione BIDS con modalità rilevata. "
+            "Usato dal frontend per mostrare la preview file e permettere l'override."
+        ).modelParam(
+            "folderId", model=Folder, level=AccessType.READ, destName="folder", paramType="path"
+        )
+    )
+    def getSessionFiles(self, folder, params):
+        import cherrypy
+        from girder_client import GirderClient
+
+        from .tasks._helpers import (
+            bids_detect_modality,
+            bids_list_session_files,
+            bids_resolve_participant_label_from_folder,
+            bids_resolve_session_label,
+        )
+
+        token = getCurrentToken()
+        gc = GirderClient(apiUrl=cherrypy.request.base + "/api/v1")
+        gc.token = str(token["_id"])
+
+        folder_id = str(folder["_id"])
+        items = bids_list_session_files(gc, folder_id)
+
+        files = []
+        for item in items:
+            name = item.get("name", "")
+            modality, datatype = bids_detect_modality(name)
+            item_files = gc.get(f"item/{item['_id']}/files", parameters={"limit": 1})
+            file_id = str(item_files[0]["_id"]) if item_files else None
+            files.append({
+                "item_id": str(item["_id"]),
+                "name": name,
+                "modality": modality,
+                "datatype": datatype,
+                "file_id": file_id,
+            })
+
+        participant_label = bids_resolve_participant_label_from_folder(gc, folder_id)
+        session_label = bids_resolve_session_label(gc, folder_id)
+
+        return {
+            "folder_id": folder_id,
+            "participant_label": participant_label,
+            "session_label": session_label,
+            "files": files,
         }
 
     @access.user(scope=TokenScope.DATA_WRITE)

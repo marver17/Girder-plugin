@@ -77,6 +77,8 @@ def run_lstai_task(task, **kwargs):
     item_id = kwargs.get("item_id")
     file_id = kwargs.get("file_id")
     flair_file_id = kwargs.get("flair_file_id")
+    override_t1w_file_id = kwargs.get("override_t1w_file_id") or None
+    override_flair_file_id = kwargs.get("override_flair_file_id") or None
     participant_label_hint = kwargs.get("participant_label") or ""
     threshold = float(kwargs.get("threshold", 0.5))
     use_gpu = bool(kwargs.get("use_gpu", True))
@@ -154,31 +156,41 @@ def run_lstai_task(task, **kwargs):
                     del raw
 
         if is_session:
-            # ── Modalità sessione: auto-detect T1w e FLAIR ────────────────
-            progress("Ricerca T1w nella sessione...", current=8)
-            t1w_item = bids_find_modality_file(gc, session_folder_id, "T1w")
-            if not t1w_item:
-                msg = f"Nessun file T1w trovato nella sessione {session_folder_id}"
-                _update_status(status="error", error={"message": msg, "timestamp": now_iso()})
-                raise Exception(msg)
+            # ── Modalità sessione: override esplicito o auto-detect ───────
+            if override_t1w_file_id:
+                progress("T1w (override)...", current=8)
+                _download_and_compress(override_t1w_file_id, t1w_path)
+            else:
+                progress("Ricerca T1w nella sessione...", current=8)
+                t1w_item = bids_find_modality_file(gc, session_folder_id, "T1w")
+                if not t1w_item:
+                    msg = f"Nessun file T1w trovato nella sessione {session_folder_id}"
+                    _update_status(status="error", error={"message": msg, "timestamp": now_iso()})
+                    raise Exception(msg)
+                t1w_files = gc.get(f"item/{t1w_item['_id']}/files", parameters={"limit": 1})
+                if not t1w_files:
+                    msg = "Item T1w trovato ma senza file allegati"
+                    _update_status(status="error", error={"message": msg, "timestamp": now_iso()})
+                    raise Exception(msg)
+                t1w_dl_id = str(t1w_files[0]["_id"])
+                progress(f"Scaricamento T1w: {t1w_item.get('name', '')}", current=10)
+                _download_and_compress(t1w_dl_id, t1w_path)
 
-            t1w_files = gc.get(f"item/{t1w_item['_id']}/files", parameters={"limit": 1})
-            if not t1w_files:
-                msg = "Item T1w trovato ma senza file allegati"
-                _update_status(status="error", error={"message": msg, "timestamp": now_iso()})
-                raise Exception(msg)
-            t1w_dl_id = str(t1w_files[0]["_id"])
-            progress(f"Scaricamento T1w: {t1w_item.get('name', '')}", current=10)
-            _download_and_compress(t1w_dl_id, t1w_path)
-
-            flair_item = bids_find_modality_file(gc, session_folder_id, "FLAIR")
-            if flair_item:
-                flair_files = gc.get(f"item/{flair_item['_id']}/files", parameters={"limit": 1})
-                if flair_files:
-                    actual_flair_file_id = str(flair_files[0]["_id"])
-                    flair_path = Path(tmpdir) / "flair.nii.gz"
-                    progress(f"Scaricamento FLAIR: {flair_item.get('name', '')}", current=13)
-                    _download_and_compress(actual_flair_file_id, flair_path)
+            # FLAIR: override esplicito o auto-detect
+            if override_flair_file_id:
+                actual_flair_file_id = override_flair_file_id
+                flair_path = Path(tmpdir) / "flair.nii.gz"
+                progress("FLAIR (override)...", current=13)
+                _download_and_compress(override_flair_file_id, flair_path)
+            else:
+                flair_item = bids_find_modality_file(gc, session_folder_id, "FLAIR")
+                if flair_item:
+                    flair_files = gc.get(f"item/{flair_item['_id']}/files", parameters={"limit": 1})
+                    if flair_files:
+                        actual_flair_file_id = str(flair_files[0]["_id"])
+                        flair_path = Path(tmpdir) / "flair.nii.gz"
+                        progress(f"Scaricamento FLAIR: {flair_item.get('name', '')}", current=13)
+                        _download_and_compress(actual_flair_file_id, flair_path)
         else:
             # ── Modalità item singolo ─────────────────────────────────────
             if not file_id:

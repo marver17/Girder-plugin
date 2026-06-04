@@ -390,6 +390,8 @@ def run_freesurfer_task(task, **kwargs):
     keep_subjects_dir = bool(kwargs.get("keep_subjects_dir", True))
     timeout = int(kwargs.get("timeout", 14400))
     derivatives_root_id = kwargs.get("derivatives_root_id") or None
+    override_t1w_file_id = kwargs.get("override_t1w_file_id") or None
+    override_t2w_file_id = kwargs.get("override_t2w_file_id") or None
     job_id = kwargs.get("job_id")
     job_token_id = kwargs.get("job_token_id")
     # ─────────────────────────────────────────────────────────────────────────
@@ -469,41 +471,53 @@ def run_freesurfer_task(task, **kwargs):
         t2w_file_id = None
 
         if is_session:
-            # Trova T1w (required) e T2w (optional) nella cartella sessione
-            progress("Ricerca file T1w nella sessione...", current=8)
-            t1w_item = bids_find_modality_file(gc, session_folder_id, "T1w")
-            if not t1w_item:
-                msg = f"Nessun file T1w trovato nella sessione {session_folder_id}"
-                _update_status(status="error", error={"message": msg, "timestamp": now_iso()})
-                raise Exception(msg)
-
-            t1w_files = gc.get(f"item/{t1w_item['_id']}/files", parameters={"limit": 1})
-            if not t1w_files:
-                msg = "Item T1w trovato ma senza file allegati"
-                _update_status(status="error", error={"message": msg, "timestamp": now_iso()})
-                raise Exception(msg)
-            t1w_file_id = str(t1w_files[0]["_id"])
-            file_name = t1w_item.get("name", "T1w.nii.gz")
+            # T1w: usa override esplicito oppure auto-detect
+            if override_t1w_file_id:
+                t1w_file_id = override_t1w_file_id
+                file_name = gc.get(f"file/{t1w_file_id}").get("name", "T1w.nii.gz")
+                progress(f"T1w (override): {file_name}", current=8)
+            else:
+                progress("Ricerca file T1w nella sessione...", current=8)
+                t1w_item = bids_find_modality_file(gc, session_folder_id, "T1w")
+                if not t1w_item:
+                    msg = f"Nessun file T1w trovato nella sessione {session_folder_id}"
+                    _update_status(status="error", error={"message": msg, "timestamp": now_iso()})
+                    raise Exception(msg)
+                t1w_files = gc.get(f"item/{t1w_item['_id']}/files", parameters={"limit": 1})
+                if not t1w_files:
+                    msg = "Item T1w trovato ma senza file allegati"
+                    _update_status(status="error", error={"message": msg, "timestamp": now_iso()})
+                    raise Exception(msg)
+                t1w_file_id = str(t1w_files[0]["_id"])
+                file_name = t1w_item.get("name", "T1w.nii.gz")
 
             progress(f"Scaricamento T1w: {file_name}", current=10)
             gc.downloadFile(t1w_file_id, str(nifti_path))
 
-            # T2w opzionale
-            t2w_item = bids_find_modality_file(gc, session_folder_id, "T2w")
-            if t2w_item:
-                t2w_files = gc.get(f"item/{t2w_item['_id']}/files", parameters={"limit": 1})
-                if t2w_files:
-                    t2w_file_id = str(t2w_files[0]["_id"])
-                    t2w_path = Path(tmpdir) / "t2w.nii.gz"
-                    progress(f"Scaricamento T2w: {t2w_item.get('name', '')}", current=12)
-                    gc.downloadFile(t2w_file_id, str(t2w_path))
-                    # Comprimi T2w se necessario
-                    with open(t2w_path, "rb") as f:
-                        if f.read(2) != b"\x1f\x8b":
-                            raw = t2w_path.read_bytes()
-                            with _gzip.open(t2w_path, "wb") as gz:
-                                gz.write(raw)
-                            del raw
+            # T2w: usa override esplicito oppure auto-detect
+            if override_t2w_file_id:
+                t2w_file_id = override_t2w_file_id
+                t2w_path = Path(tmpdir) / "t2w.nii.gz"
+                progress("Scaricamento T2w (override)...", current=12)
+                gc.downloadFile(t2w_file_id, str(t2w_path))
+            else:
+                t2w_item = bids_find_modality_file(gc, session_folder_id, "T2w")
+                if t2w_item:
+                    t2w_files = gc.get(f"item/{t2w_item['_id']}/files", parameters={"limit": 1})
+                    if t2w_files:
+                        t2w_file_id = str(t2w_files[0]["_id"])
+                        t2w_path = Path(tmpdir) / "t2w.nii.gz"
+                        progress(f"Scaricamento T2w: {t2w_item.get('name', '')}", current=12)
+                        gc.downloadFile(t2w_file_id, str(t2w_path))
+
+            # Comprimi T2w se necessario
+            if t2w_path and t2w_path.exists():
+                with open(t2w_path, "rb") as f:
+                    if f.read(2) != b"\x1f\x8b":
+                        raw = t2w_path.read_bytes()
+                        with _gzip.open(t2w_path, "wb") as gz:
+                            gz.write(raw)
+                        del raw
         else:
             progress("Scaricamento file NIfTI...", current=10)
             gc.downloadFile(file_id, str(nifti_path))

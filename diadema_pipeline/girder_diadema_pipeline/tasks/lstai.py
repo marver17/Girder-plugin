@@ -41,6 +41,7 @@ from ._helpers import (
     bids_resolve_participant_label_from_folder,
     bids_resolve_session_label,
     bids_upload_derivative,
+    get_nifti_file_from_item,
     idempotency_guard,
     kill_proc,
     make_safe_progress,
@@ -167,12 +168,12 @@ def run_lstai_task(task, **kwargs):
                     msg = f"Nessun file T1w trovato nella sessione {session_folder_id}"
                     _update_status(status="error", error={"message": msg, "timestamp": now_iso()})
                     raise Exception(msg)
-                t1w_files = gc.get(f"item/{t1w_item['_id']}/files", parameters={"limit": 1})
-                if not t1w_files:
-                    msg = "Item T1w trovato ma senza file allegati"
+                t1w_nifti = get_nifti_file_from_item(gc, str(t1w_item["_id"]))
+                if not t1w_nifti:
+                    msg = "Item T1w trovato ma senza file NIfTI allegato"
                     _update_status(status="error", error={"message": msg, "timestamp": now_iso()})
                     raise Exception(msg)
-                t1w_dl_id = str(t1w_files[0]["_id"])
+                t1w_dl_id = str(t1w_nifti["_id"])
                 progress(f"Scaricamento T1w: {t1w_item.get('name', '')}", current=10)
                 _download_and_compress(t1w_dl_id, t1w_path)
 
@@ -185,9 +186,9 @@ def run_lstai_task(task, **kwargs):
             else:
                 flair_item = bids_find_modality_file(gc, session_folder_id, "FLAIR")
                 if flair_item:
-                    flair_files = gc.get(f"item/{flair_item['_id']}/files", parameters={"limit": 1})
-                    if flair_files:
-                        actual_flair_file_id = str(flair_files[0]["_id"])
+                    flair_nifti = get_nifti_file_from_item(gc, str(flair_item["_id"]))
+                    if flair_nifti:
+                        actual_flair_file_id = str(flair_nifti["_id"])
                         flair_path = Path(tmpdir) / "flair.nii.gz"
                         progress(f"Scaricamento FLAIR: {flair_item.get('name', '')}", current=13)
                         _download_and_compress(actual_flair_file_id, flair_path)

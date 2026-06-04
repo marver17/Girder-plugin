@@ -1152,6 +1152,7 @@ class DiademaResource(Resource):
             bids_list_session_files,
             bids_resolve_participant_label_from_folder,
             bids_resolve_session_label,
+            get_nifti_file_from_item,
         )
 
         token = getCurrentToken()
@@ -1165,14 +1166,22 @@ class DiademaResource(Resource):
         for item in items:
             name = item.get("name", "")
             modality, datatype = bids_detect_modality(name)
-            item_files = gc.get(f"item/{item['_id']}/files", parameters={"limit": 1})
-            file_id = str(item_files[0]["_id"]) if item_files else None
+
+            # Cerca il file NIfTI specificatamente (l'item può contenere NIfTI + JSON)
+            nifti_file = get_nifti_file_from_item(gc, str(item["_id"]))
+            if nifti_file is None:
+                continue
+
+            # Se il nome item non ha modality (es. item named ".nii.gz"), prova dal nome file
+            if not modality:
+                modality, datatype = bids_detect_modality(nifti_file.get("name", ""))
+
             files.append({
                 "item_id": str(item["_id"]),
-                "name": name,
+                "name": name or nifti_file.get("name", ""),
                 "modality": modality,
                 "datatype": datatype,
-                "file_id": file_id,
+                "file_id": str(nifti_file["_id"]),
             })
 
         participant_label = bids_resolve_participant_label_from_folder(gc, folder_id)

@@ -35,6 +35,7 @@ from ._helpers import (
     bids_resolve_participant_label_from_folder,
     bids_resolve_session_label,
     bids_upload_derivative,
+    get_nifti_file_from_item,
     idempotency_guard,
     kill_proc,
     make_safe_progress,
@@ -209,10 +210,10 @@ def run_mriqc_task(task, **kwargs):
                 dest_dir.mkdir(parents=True, exist_ok=True)
                 nifti_path = dest_dir / f"{bids_stem}.nii.gz"
 
-                files_in_item = gc.get(f"item/{file_item['_id']}/files", parameters={"limit": 1})
-                if not files_in_item:
+                nifti_file = get_nifti_file_from_item(gc, str(file_item["_id"]))
+                if not nifti_file:
                     continue
-                dl_file_id = str(files_in_item[0]["_id"])
+                dl_file_id = str(nifti_file["_id"])
                 gc.downloadFile(dl_file_id, str(nifti_path))
 
                 # Comprimi se non gzip

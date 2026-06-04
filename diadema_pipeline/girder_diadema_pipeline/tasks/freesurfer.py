@@ -59,6 +59,7 @@ from ._helpers import (
     bids_resolve_participant_label_from_folder,
     bids_resolve_session_label,
     bids_upload_derivative,
+    get_nifti_file_from_item,
     idempotency_guard,
     kill_proc,
     make_safe_progress,
@@ -483,12 +484,12 @@ def run_freesurfer_task(task, **kwargs):
                     msg = f"Nessun file T1w trovato nella sessione {session_folder_id}"
                     _update_status(status="error", error={"message": msg, "timestamp": now_iso()})
                     raise Exception(msg)
-                t1w_files = gc.get(f"item/{t1w_item['_id']}/files", parameters={"limit": 1})
-                if not t1w_files:
-                    msg = "Item T1w trovato ma senza file allegati"
+                t1w_nifti = get_nifti_file_from_item(gc, str(t1w_item["_id"]))
+                if not t1w_nifti:
+                    msg = "Item T1w trovato ma senza file NIfTI allegato"
                     _update_status(status="error", error={"message": msg, "timestamp": now_iso()})
                     raise Exception(msg)
-                t1w_file_id = str(t1w_files[0]["_id"])
+                t1w_file_id = str(t1w_nifti["_id"])
                 file_name = t1w_item.get("name", "T1w.nii.gz")
 
             progress(f"Scaricamento T1w: {file_name}", current=10)
@@ -503,9 +504,9 @@ def run_freesurfer_task(task, **kwargs):
             else:
                 t2w_item = bids_find_modality_file(gc, session_folder_id, "T2w")
                 if t2w_item:
-                    t2w_files = gc.get(f"item/{t2w_item['_id']}/files", parameters={"limit": 1})
-                    if t2w_files:
-                        t2w_file_id = str(t2w_files[0]["_id"])
+                    t2w_nifti = get_nifti_file_from_item(gc, str(t2w_item["_id"]))
+                    if t2w_nifti:
+                        t2w_file_id = str(t2w_nifti["_id"])
                         t2w_path = Path(tmpdir) / "t2w.nii.gz"
                         progress(f"Scaricamento T2w: {t2w_item.get('name', '')}", current=12)
                         gc.downloadFile(t2w_file_id, str(t2w_path))

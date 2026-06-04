@@ -365,15 +365,49 @@ _BIDS_MODALITY_DATATYPE = {
 }
 
 
+def get_nifti_file_from_item(gc, item_id):
+    """
+    Restituisce il file NIfTI (.nii.gz o .nii) dentro un item Girder.
+    Un item BIDS tipicamente contiene sia il NIfTI che il JSON sidecar:
+    questa funzione trova specificamente il file NIfTI evitando di restituire il JSON.
+    Ritorna il dict del file, o None se non trovato.
+    """
+    try:
+        files = gc.get(f"item/{item_id}/files", parameters={"limit": 20})
+        for f in files:
+            fname = f.get("name", "").lower()
+            if fname.endswith(".nii.gz") or fname.endswith(".nii"):
+                return f
+    except Exception as exc:
+        logger.warning("[bids] get_nifti_file_from_item item=%s fallito: %s", item_id, exc)
+    return None
+
+
 def bids_list_session_files(gc, folder_id):
-    """Elenca tutti gli item NIfTI dentro una cartella sessione BIDS (ricorsivo)."""
+    """
+    Elenca gli item NIfTI dentro una cartella sessione BIDS (ricorsivo).
+    Rileva item NIfTI sia dal nome dell'item (se include .nii/.nii.gz)
+    sia cercando il file NIfTI all'interno dell'item (per item con nome
+    senza estensione che contengono NIfTI + JSON sidecar).
+    """
     nifti_items = []
 
     def _collect(fid):
         items = gc.get("item", parameters={"folderId": fid, "limit": 200})
         for item in items:
-            if item.get("name", "").lower().endswith((".nii.gz", ".nii")):
+            name = item.get("name", "")
+            # Caso 1: il nome item termina in .nii/.nii.gz
+            if name.lower().endswith((".nii.gz", ".nii")):
                 nifti_items.append(item)
+                continue
+            # Caso 2: item senza estensione che contiene NIfTI + JSON
+            # (struttura BIDS tipica: item "sub-001_T1w" con file .nii.gz e .json)
+            modality, _ = bids_detect_modality(name)
+            if modality:
+                nifti_file = get_nifti_file_from_item(gc, str(item["_id"]))
+                if nifti_file:
+                    nifti_items.append(item)
+
         subfolders = gc.get(
             "folder",
             parameters={"parentType": "folder", "parentId": fid, "limit": 50},

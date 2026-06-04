@@ -207,23 +207,41 @@ def resolve_dir(explicit_path, env_var, default, label, task_name):
 
 
 def bids_get_or_create_folder(gc, parent_id, parent_type, name):
-    """Restituisce l'ID di una Girder folder con `name` sotto `parent`, creandola se assente."""
-    existing = gc.get(
-        "folder",
-        parameters={
-            "parentType": parent_type,
-            "parentId": parent_id,
-            "name": name,
-            "limit": 1,
-        },
-    )
-    if existing:
-        return str(existing[0]["_id"])
-    new_folder = gc.post(
-        "folder",
-        parameters={"parentType": parent_type, "parentId": parent_id, "name": name},
-    )
-    return str(new_folder["_id"])
+    """Restituisce l'ID di una Girder folder con `name` sotto `parent`, creandola se assente.
+    Se parent_type è errato (es. "folder" su un ID collection), rileva automaticamente
+    il tipo corretto provando entrambi i valori possibili."""
+    types_to_try = [parent_type] if parent_type else ["folder", "collection"]
+    # Garantisce che l'altro tipo venga provato come fallback
+    if parent_type == "folder":
+        types_to_try = ["folder", "collection"]
+    elif parent_type == "collection":
+        types_to_try = ["collection", "folder"]
+
+    last_exc = None
+    for ptype in types_to_try:
+        try:
+            existing = gc.get(
+                "folder",
+                parameters={
+                    "parentType": ptype,
+                    "parentId": parent_id,
+                    "name": name,
+                    "limit": 1,
+                },
+            )
+            if existing:
+                return str(existing[0]["_id"])
+            new_folder = gc.post(
+                "folder",
+                parameters={"parentType": ptype, "parentId": parent_id, "name": name},
+            )
+            return str(new_folder["_id"])
+        except Exception as exc:
+            last_exc = exc
+            logger.debug("[bids] bids_get_or_create_folder parentType=%s fallito: %s", ptype, exc)
+            continue
+
+    raise last_exc
 
 
 def bids_find_dataset_root(gc, item_id):

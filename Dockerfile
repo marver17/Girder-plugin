@@ -35,7 +35,7 @@ RUN groupadd -g 1000 girder && \
 RUN curl -LJ https://github.com/krallin/tini/releases/download/v0.19.0/tini -o /sbin/tini && \
     chmod +x /sbin/tini
 
-RUN curl -sL https://deb.nodesource.com/setup_18.x | bash - && \
+RUN curl -sL https://deb.nodesource.com/setup_22.x | bash - && \
     apt-get install -qy nodejs
 
 ENV PATH="/usr/local/node:$PATH"
@@ -47,11 +47,12 @@ WORKDIR /girder
 RUN mkdir -p /home/girder/.local/share/girder /workspace && \
     chown -R girder:girder /girder /home/girder /workspace 
 
-RUN git clone --branch v4-integration --single-branch https://github.com/girder/girder.git /girder
+RUN git clone --single-branch https://github.com/girder/girder.git /girder
 
 RUN cd /girder/girder/web && npm i && npm run build
 
-RUN pip install --break-system-packages -e /girder
+RUN git config --global --add safe.directory /girder && \
+    pip install --break-system-packages /girder
 
 # COPY plugins.txt /girder/plugins.txt
 # RUN pip3 install -r /girder/plugins.txt

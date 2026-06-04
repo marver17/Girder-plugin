@@ -137,10 +137,12 @@ def run_lstai_task(task, **kwargs):
     output_dir.mkdir(parents=True, exist_ok=True)
     # ─────────────────────────────────────────────────────────────────────────
 
+    derivatives_root_type = None
     if not derivatives_root_id and is_session:
-        root_id, _ = bids_find_dataset_root_from_folder(gc, session_folder_id)
+        root_id, root_type = bids_find_dataset_root_from_folder(gc, session_folder_id)
         if root_id:
             derivatives_root_id = root_id
+            derivatives_root_type = root_type
 
     with tempfile.TemporaryDirectory() as tmpdir:
         t1w_path = Path(tmpdir) / "t1w.nii.gz"
@@ -307,6 +309,7 @@ def run_lstai_task(task, **kwargs):
                         datatype="anat",
                         participant_label=participant_label,
                         derivatives_root_id=derivatives_root_id,
+                        derivatives_root_type=derivatives_root_type,
                         pipeline_name="lstai",
                     )
                     uploaded.append(out_file.name)

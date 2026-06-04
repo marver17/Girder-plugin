@@ -231,6 +231,7 @@ def upload_freesurfer_results(task, **kwargs):
     result_meta = kwargs.get("result_meta", {})
     keep_subjects_dir = bool(kwargs.get("keep_subjects_dir", True))
     derivatives_root_id = kwargs.get("derivatives_root_id") or None
+    derivatives_root_type = kwargs.get("derivatives_root_type") or None
     participant_label_hint = kwargs.get("participant_label", "")
 
     girder_api_url = resolve_girder_url(task)
@@ -278,6 +279,7 @@ def upload_freesurfer_results(task, **kwargs):
             datatype="anat",
             participant_label=participant_label,
             derivatives_root_id=derivatives_root_id,
+            derivatives_root_type=derivatives_root_type,
             pipeline_name="freesurfer",
         )
         uploaded.append("recon-all.log")
@@ -319,6 +321,7 @@ def upload_freesurfer_results(task, **kwargs):
             datatype="anat",
             participant_label=participant_label,
             derivatives_root_id=derivatives_root_id,
+            derivatives_root_type=derivatives_root_type,
             pipeline_name="freesurfer",
         )
         uploaded.append("freesurfer_stats.json")
@@ -459,10 +462,12 @@ def run_freesurfer_task(task, **kwargs):
     subject_dir = subjects_dir / subject_id
     # ─────────────────────────────────────────────────────────────────────────
 
+    derivatives_root_type = None
     if not derivatives_root_id and is_session:
-        root_id, _ = bids_find_dataset_root_from_folder(gc, session_folder_id)
+        root_id, root_type = bids_find_dataset_root_from_folder(gc, session_folder_id)
         if root_id:
             derivatives_root_id = root_id
+            derivatives_root_type = root_type
 
     with tempfile.TemporaryDirectory() as tmpdir:
         import gzip as _gzip
@@ -673,6 +678,7 @@ def run_freesurfer_task(task, **kwargs):
                     result_meta=result_meta,
                     keep_subjects_dir=keep_subjects_dir,
                     derivatives_root_id=derivatives_root_id,
+                    derivatives_root_type=derivatives_root_type,
                     participant_label=participant_label,
                 ),
                 headers={

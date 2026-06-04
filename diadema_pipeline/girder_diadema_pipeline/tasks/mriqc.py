@@ -167,10 +167,12 @@ def run_mriqc_task(task, **kwargs):
     work_dir.mkdir(parents=True, exist_ok=True)
     # ─────────────────────────────────────────────────────────────────────────
 
+    derivatives_root_type = None
     if not derivatives_root_id and is_session:
-        root_id, _ = bids_find_dataset_root_from_folder(gc, session_folder_id)
+        root_id, root_type = bids_find_dataset_root_from_folder(gc, session_folder_id)
         if root_id:
             derivatives_root_id = root_id
+            derivatives_root_type = root_type  # "folder" o "collection"
 
     with tempfile.TemporaryDirectory() as tmpdir:
         input_dir = Path(tmpdir) / "input"
@@ -371,6 +373,7 @@ def run_mriqc_task(task, **kwargs):
                             datatype=detected_dtype,
                             participant_label=participant_label,
                             derivatives_root_id=derivatives_root_id,
+                            derivatives_root_type=derivatives_root_type,
                             pipeline_name="mriqc",
                         )
                         uploaded.append(html_file.name)
@@ -382,6 +385,7 @@ def run_mriqc_task(task, **kwargs):
                             datatype=detected_dtype,
                             participant_label=participant_label,
                             derivatives_root_id=derivatives_root_id,
+                            derivatives_root_type=derivatives_root_type,
                             pipeline_name="mriqc",
                         )
                         uploaded.append(jf.name)

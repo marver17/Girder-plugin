@@ -36,56 +36,36 @@ install_plugins() {
     echo "──── Plugin installati ──────────────────────────────────────────"
 }
 
-# Compila il frontend JS di un plugin se i sorgenti sono più recenti del bundle.
-# Salta silenziosamente se il plugin non ha web_client o se npm non è disponibile.
-build_frontend_if_needed() {
-    local plugin_dir="$1"
-    local web_dir
+# Dopo la reinstallazione da /workspace il dist in site-packages è quello stale
+# del repo. Ripristina il dist pre-compilato dal Dockerfile (in /plugins/)
+# copiandolo su site-packages — scrivibile nel container senza problemi di permessi.
+restore_built_frontends() {
+    echo "──── Ripristino frontend pre-compilati ──────────────────────────"
+    for plugin_name in nifti_viewer diadema_pipeline; do
+        local pkg_mod="girder_${plugin_name}"
+        local site_dir
+        site_dir=$(python3 -c "import ${pkg_mod}; import os; print(os.path.dirname(${pkg_mod}.__file__))" 2>/dev/null)
+        if [ -z "$site_dir" ]; then
+            echo "  ⚠  ${plugin_name}: modulo non trovato, skip"
+            continue
+        fi
 
-    # Cerca la web_client (schema: plugin/girder_plugin/web_client)
-    web_dir=$(find "$plugin_dir" -maxdepth 2 -name "web_client" -type d 2>/dev/null | head -1)
-    [ -z "$web_dir" ] || [ ! -f "$web_dir/package.json" ] && return 0
+        local src_dist
+        src_dist=$(find "/plugins/${plugin_name}" -path "*/web_client/dist" -type d 2>/dev/null | head -1)
+        if [ -z "$src_dist" ]; then
+            echo "  ⚠  ${plugin_name}: dist pre-compilato non trovato in /plugins, skip"
+            continue
+        fi
 
-    local dist_file
-    dist_file=$(find "$web_dir/dist" -name "*.umd.cjs" 2>/dev/null | head -1)
-
-    # Rebuild se: dist non esiste, OPPURE qualche sorgente JS è più recente del bundle
-    local needs_build=0
-    if [ -z "$dist_file" ]; then
-        needs_build=1
-    elif find "$web_dir" \
-            \( -name "*.js" -o -name "*.ts" -o -name "*.vue" \) \
-            -newer "$dist_file" \
-            -not -path "*/dist/*" \
-            -not -path "*/node_modules/*" \
-            2>/dev/null | grep -q .; then
-        needs_build=1
-    fi
-
-    if [ "$needs_build" -eq 0 ]; then
-        echo "  ✓ Frontend $(basename "$plugin_dir") già aggiornato, skip"
-        return 0
-    fi
-
-    echo "  Building frontend $(basename "$plugin_dir")..."
-    cd "$web_dir"
-    npm install --silent 2>/dev/null
-    npm run build 2>/dev/null
-    echo "  ✓ Frontend $(basename "$plugin_dir") compilato"
-}
-
-build_frontends() {
-    echo "──── Build frontend plugin ──────────────────────────────────────"
-    for plugin in \
-        "$WORKSPACE/nifti_viewer" \
-        "$WORKSPACE/diadema_pipeline"; do
-        build_frontend_if_needed "$plugin"
+        echo "  ✓ ${plugin_name}: ripristino dist da /plugins"
+        rm -rf "${site_dir}/web_client/dist"
+        cp -r "$src_dist" "${site_dir}/web_client/dist"
     done
-    echo "──── Frontend aggiornati ────────────────────────────────────────"
+    echo "──── Frontend ripristinati ──────────────────────────────────────"
 }
 
 install_plugins
-build_frontends
+restore_built_frontends
 
 run_bootstrap() {
     echo "──── Bootstrap Girder (settings / users / assetstore) ──────────"

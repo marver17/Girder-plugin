@@ -59,14 +59,24 @@ RUN git config --global --add safe.directory /girder && \
 
 
 
-COPY ./oauth2 /girder/oauth2
-RUN pip install --break-system-packages -e /girder/oauth2
+# ── Plugin: oauth2 ───────────────────────────────────────────────────────────
+COPY ./oauth2 /plugins/oauth2
+RUN pip install --break-system-packages /plugins/oauth2
 
-# RUN girder build && \
-#     rm --recursive --force \
-#     /root/.npm \
-#     /usr/local/lib/python*/site-packages/girder/web_client/node_modules
+# ── Plugin: nifti_viewer (con build frontend) ─────────────────────────────────
+COPY ./nifti_viewer /plugins/nifti_viewer
+RUN cd /plugins/nifti_viewer/girder_nifti_viewer/web_client && \
+    npm install && npm run build
+RUN pip install --break-system-packages /plugins/nifti_viewer
 
+# ── Plugin: diadema_pipeline (con build frontend) ─────────────────────────────
+COPY ./diadema_pipeline /plugins/diadema_pipeline
+RUN cd /plugins/diadema_pipeline/girder_diadema_pipeline/web_client && \
+    npm install && npm run build
+RUN pip install --break-system-packages /plugins/diadema_pipeline
+
+# Pulizia cache npm per ridurre la dimensione dell'immagine
+RUN npm cache clean --force
 
 EXPOSE 8080
 

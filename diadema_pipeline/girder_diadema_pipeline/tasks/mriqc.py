@@ -15,6 +15,7 @@ Il BIDS input viene sempre creato in un tmpdir effimero.
 import datetime
 import json
 import logging
+import math
 import os
 import subprocess
 import tempfile
@@ -48,6 +49,19 @@ from ._helpers import (
     update_diadema_tool,
     update_diadema_tool_on_folder,
 )
+
+def _sanitize_floats(obj):
+    """Sostituisce NaN/Inf con None per garantire serializzazione JSON valida.
+    Le metriche MRIQC possono contenere NaN quando un indicatore non è calcolabile.
+    json.dumps() (usato internamente da requests/GirderClient) rifiuta NaN/Inf."""
+    if isinstance(obj, float):
+        return None if (math.isnan(obj) or math.isinf(obj)) else obj
+    if isinstance(obj, dict):
+        return {k: _sanitize_floats(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_sanitize_floats(v) for v in obj]
+    return obj
+
 
 # Default dir se non viene passato nulla
 _DEFAULT_MRIQC_OUTPUT_DIR = "/data/diadema/mriqc"
@@ -349,7 +363,7 @@ def run_mriqc_task(task, **kwargs):
                     json_files = list(output_dir.glob(f"**/*_{detected_mod}.json"))
                     if json_files:
                         with open(json_files[0]) as f:
-                            per_modality_metrics[detected_mod] = json.load(f)
+                            per_modality_metrics[detected_mod] = _sanitize_floats(json.load(f))
                     # Upload HTML e JSON
                     for html_file in output_dir.glob(f"**/*_{detected_mod}*.html"):
                         did = bids_upload_derivative(
@@ -397,7 +411,7 @@ def run_mriqc_task(task, **kwargs):
                 json_files = list(output_dir.glob(f"**/sub-{participant_label}_{modality}.json"))
                 if json_files:
                     with open(json_files[0]) as f:
-                        metrics = json.load(f)
+                        metrics = _sanitize_floats(json.load(f))
 
                 if modality == "bold":
                     bids_datatype = "func"

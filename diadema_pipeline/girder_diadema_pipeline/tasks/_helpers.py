@@ -113,16 +113,19 @@ def update_diadema_tool(gc, item_id, tool_id, **data):
 
     Scrive in item.diadema.{tool_id} (campo dedicato, separato da item.meta).
     I chiavi tipiche sono: status, results, error, job_id.
+    Propaga l'eccezione in caso di fallimento: il task va in ERROR invece
+    di tornare SUCCESS con dati mancanti.
     """
     try:
         gc.put(f"diadema_pipeline/{item_id}/processing/{tool_id}", json=data)
     except Exception as exc:
-        logger.warning(
-            "[diadema] update_diadema_tool item=%s tool=%s fallito: %s",
+        logger.error(
+            "[diadema] update_diadema_tool FAILED item=%s tool=%s: %s",
             item_id,
             tool_id,
             exc,
         )
+        raise
 
 
 def set_job_cancelled(gc, job_id, task_name):
@@ -544,16 +547,20 @@ def bids_find_dataset_root_from_folder(gc, folder_id):
 
 
 def update_diadema_tool_on_folder(gc, folder_id, tool_id, **data):
-    """Aggiorna i dati di elaborazione per un tool a livello di cartella sessione BIDS."""
+    """Aggiorna i dati di elaborazione per un tool a livello di cartella sessione BIDS.
+    Propaga l'eccezione in caso di fallimento: il task va in ERROR invece
+    di tornare SUCCESS con dati mancanti.
+    """
     try:
         gc.put(f"diadema_pipeline/session/{folder_id}/processing/{tool_id}", json=data)
     except Exception as exc:
-        logger.warning(
-            "[diadema] update_diadema_tool_on_folder folder=%s tool=%s fallito: %s",
+        logger.error(
+            "[diadema] update_diadema_tool_on_folder FAILED folder=%s tool=%s: %s",
             folder_id,
             tool_id,
             exc,
         )
+        raise
 
 
 def bids_upload_derivative(

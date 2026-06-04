@@ -359,15 +359,34 @@ def run_mriqc_task(task, **kwargs):
             derivative_item_ids = []
 
             if is_session:
-                # Un set di risultati per ogni modalità processata
                 per_modality_metrics = {}
+                mriqc_ver = tool_version("mriqc")
+
+                # Log output directory per debug
+                all_output = list(output_dir.glob("**/*"))
+                progress(
+                    f"Output MRIQC: {len(all_output)} file/dir in {output_dir}",
+                    current=82,
+                )
+                logger.info("[%s] Output dir contents: %s", TASK_NAME,
+                            [str(p.relative_to(output_dir)) for p in all_output if p.is_file()][:20])
+
+                # Derivati root
+                logger.info("[%s] derivatives_root_id=%s type=%s",
+                            TASK_NAME, derivatives_root_id, derivatives_root_type)
+
                 for file_item, nifti_path, detected_mod, detected_dtype in downloaded_files:
                     json_files = list(output_dir.glob(f"**/*_{detected_mod}.json"))
+                    html_files = list(output_dir.glob(f"**/*_{detected_mod}*.html"))
+                    logger.info("[%s] mod=%s json=%d html=%d",
+                                TASK_NAME, detected_mod, len(json_files), len(html_files))
+
                     if json_files:
                         with open(json_files[0]) as f:
                             per_modality_metrics[detected_mod] = _sanitize_floats(json.load(f))
-                    # Upload HTML e JSON
-                    for html_file in output_dir.glob(f"**/*_{detected_mod}*.html"):
+
+                    # Upload HTML e JSON come BIDS derivatives
+                    for html_file in html_files:
                         did = bids_upload_derivative(
                             gc, None, html_file,
                             datatype=detected_dtype,
@@ -379,7 +398,7 @@ def run_mriqc_task(task, **kwargs):
                         uploaded.append(html_file.name)
                         if did:
                             derivative_item_ids.append(did)
-                    for jf in list(output_dir.glob(f"**/*_{detected_mod}.json")):
+                    for jf in json_files:
                         did = bids_upload_derivative(
                             gc, None, jf,
                             datatype=detected_dtype,
@@ -392,11 +411,33 @@ def run_mriqc_task(task, **kwargs):
                         if did:
                             derivative_item_ids.append(did)
 
+                    # Aggiorna anche l'item NIfTI singolo in modo che il widget
+                    # del viewer NIfTI possa mostrare le metriche per quel file
+                    item_metrics = per_modality_metrics.get(detected_mod, {})
+                    update_diadema_tool(
+                        gc, str(file_item["_id"]), "mriqc",
+                        status="completed",
+                        results={
+                            "metrics": item_metrics,
+                            "modality": detected_mod,
+                            "timestamp": now_iso(),
+                            "mriqc_version": mriqc_ver,
+                            "participant_label": participant_label,
+                            "session_label": session_label,
+                            "session_folder_id": session_folder_id,
+                            "reports_uploaded": [f for f in uploaded
+                                                 if f.endswith(".html") or f.endswith(".json")],
+                            "derivative_item_ids": derivative_item_ids,
+                        },
+                    )
+
+                progress(f"Uploaded: {len(uploaded)} file, derivati: {len(derivative_item_ids)}", current=95)
+
                 _update_status(
                     results={
                         "modalities": per_modality_metrics,
                         "timestamp": now_iso(),
-                        "mriqc_version": tool_version("mriqc"),
+                        "mriqc_version": mriqc_ver,
                         "participant_label": participant_label,
                         "session_label": session_label,
                         "session_folder_id": session_folder_id,

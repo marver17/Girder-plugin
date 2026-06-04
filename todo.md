@@ -1,0 +1,5 @@
+- Risolvere problema di widget per il lancio dei container
+- Risscrivere tutto in inglese
+- Integrare realmente e bene trame
+- Scrivere una guida coerente per installazione
+- completare container per lstai

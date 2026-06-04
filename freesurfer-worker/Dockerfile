@@ -1,15 +1,11 @@
 FROM freesurfer/freesurfer:8.1.0
 
 # ── NOTA sulla licenza FreeSurfer ─────────────────────────────────────────────
-# FreeSurfer richiede un file di licenza valido.
-# Opzione A (runtime): monta il file e imposta FS_LICENSE nel docker-compose.yml
+# La licenza viene fornita a runtime tramite volume mount nel docker-compose:
 #   volumes:
-#     - ./freesurfer_license.txt:/opt/freesurfer/license.txt
+#     - ./license.txt:/usr/local/freesurfer/license.txt:ro
 #   environment:
-#     - FS_LICENSE=/opt/freesurfer/license.txt
-#
-# Opzione B (build-time): licenza inclusa nell'immagine
-COPY license.txt /usr/local/freesurfer/license.txt
+#     - FS_LICENSE=/usr/local/freesurfer/license.txt
 # ──────────────────────────────────────────────────────────────────────────────
 
 # Dipendenze sistema: git (CentOS 7 → yum)

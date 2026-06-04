@@ -109,7 +109,7 @@ services:
     build:
       context: ../../
       dockerfile: Dockerfile
-    image: diadema-girder:testing
+    image: girder:testing
     container_name: diadema-test-girder
     networks: [diadema-test-net]
     depends_on:
@@ -160,7 +160,7 @@ services:
   # ── Celery worker – coda 'celery' (job generici Girder Worker) ─────────────
 
   celery-worker:
-    image: diadema-girder:testing
+    image: girder:testing
     container_name: diadema-test-celery-worker
     networks: [diadema-test-net]
     <<: *worker-deps

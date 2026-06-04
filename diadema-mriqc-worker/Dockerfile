@@ -4,8 +4,7 @@ FROM nipreps/mriqc:latest
 RUN apt-get update && apt-get install -qy git && \
     apt-get clean && rm -rf /var/lib/apt/lists/*
 
-# Clone Girder v4-integration branch
-RUN git clone --branch v4-integration --single-branch \
+RUN git clone --single-branch \
     https://github.com/girder/girder.git /opt/girder
 
 # Build tools

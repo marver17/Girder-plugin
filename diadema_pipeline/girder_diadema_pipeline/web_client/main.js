@@ -8,7 +8,6 @@
 
 import events from '@girder/core/events';
 import { wrap } from '@girder/core/utilities/PluginUtils';
-import FolderView from '@girder/core/views/body/FolderView';
 import ItemView from '@girder/core/views/body/ItemView';
 
 import './routes';
@@ -26,14 +25,17 @@ wrap(ItemView, 'render', function (render) {
     return render.call(this);
 });
 
-// ── 1b. Inietta il pannello nella Folder View (sessione BIDS) ──────────────────
-// FolderView.render() NON emette 'g:rendered' (crea solo un HierarchyWidget),
-// quindi chiamiamo addPanelToFolder direttamente dopo il render.
-// FolderView usa this.folder (non this.model) per il modello corrente.
-wrap(FolderView, 'render', function (render) {
-    const result = render.call(this);
-    DiademaPanel.addPanelToFolder(this);
-    return result;
+// ── 1b. Inietta il pannello sulla Folder View (sessione BIDS) ──────────────────
+// In Girder 5, FolderView NON è esposta come global (girder.views.body.FolderView
+// è undefined), quindi wrap() non funziona. Intercettiamo invece l'evento
+// g:navigateTo che Girder emette ad ogni navigazione.
+events.on('g:navigateTo', function (viewClass, settings) {
+    if (!settings || !settings.folder) return;
+    const folder = settings.folder;
+    if (!DiademaPanel._isSessionFolder(folder)) return;
+
+    // Aspettiamo che HierarchyWidget abbia reso il DOM
+    setTimeout(() => DiademaPanel.mountPanelForFolder(folder), 100);
 });
 
 // ── 2. Registra il widget con nifti_viewer ─────────────────────────────────────

@@ -714,41 +714,67 @@ const DiademaPanel = {
 
     // ── Entry point FolderView ────────────────────────────────────────────────
 
-    addPanelToFolder(folderView) {
-        // FolderView usa this.folder, non this.model
-        const folder = DiademaPanel._getViewModel(folderView);
+    /**
+     * Entry point chiamato da g:navigateTo (via main.js).
+     * Lavora direttamente sul DOM e sul FolderModel — nessun riferimento
+     * all'istanza FolderView (non disponibile come global in Girder 5).
+     */
+    mountPanelForFolder(folder) {
         if (!folder) return;
-        if (!DiademaPanel._isSessionFolder(folder)) return;
-        if (folderView.$('.g-diadema-panel').length) {
-            DiademaPanel._refreshBadges(folderView);
-            return;
+
+        // Evita duplicati (g:navigateTo può sparare più volte)
+        if ($('.g-diadema-panel[data-diadema-mode="session"]').length) {
+            // Aggiorna ID se la cartella è cambiata
+            const existing = $('.g-diadema-panel[data-diadema-mode="session"]');
+            if (existing.data('diadema-id') !== folder.id) {
+                existing.remove();
+            } else {
+                return;
+            }
         }
-        DiademaPanel._mountPanelOnFolder(folderView);
-    },
 
-    _mountPanelOnFolder(folderView) {
-        if (folderView.$('.g-diadema-panel').length) return;
-
-        const folder = DiademaPanel._getViewModel(folderView);
-        const $panel = DiademaPanel._buildPanel(folderView);
-        $panel.data('diadema-mode', 'session');
-        $panel.data('diadema-id', folder.id);
-
+        const folderId   = folder.id || folder.get('_id');
         const folderName = folder.get('name') || '';
+
+        const $panel = DiademaPanel._buildPanel({});
+        $panel.data('diadema-mode', 'session');
+        $panel.data('diadema-id', folderId);
         $panel.find('small.text-muted').first()
             .text(`Sessione BIDS (${folderName}) — seleziona un tool e premi Run`);
 
-        // HierarchyWidget usa .g-hierarchy-breadcrumb-bar come primo elemento
-        const $anchor = folderView.$('.g-hierarchy-breadcrumb-bar');
+        // Ancora: breadcrumb bar del HierarchyWidget
+        const $anchor = $('.g-hierarchy-breadcrumb-bar').first();
         if ($anchor.length) {
             $anchor.before($panel);
         } else {
-            folderView.$el.prepend($panel);
+            $('#g-app-body-container').prepend($panel);
         }
 
-        DiademaPanel._bindEvents(folderView, $panel);
-        DiademaPanel._refreshBadges(folderView);
-        DiademaPanel._resumeActiveJobs(folderView, $panel);
+        // Crea un proxy view-like per riusare i metodi esistenti
+        const proxy = {
+            folder,
+            model: folder,
+            $: (sel) => $panel.parent().find(sel),
+            $el: $panel.parent(),
+        };
+
+        DiademaPanel._bindEvents(proxy, $panel);
+        DiademaPanel._resumeActiveJobs(proxy, $panel);
+
+        // Badge iniziali dallo stato già salvato (se presenti)
+        const diadema = folder.get('diadema') || {};
+        TOOLS.forEach(tool => {
+            const s = (diadema[tool.id] || {}).status || null;
+            DiademaPanel._setBadge($panel, tool.id, s);
+        });
+    },
+
+    // Alias per backward-compat (chiamato da _resumeActiveJobs via proxy)
+    addPanelToFolder(folderView) {
+        const folder = DiademaPanel._getViewModel(folderView);
+        if (!folder) return;
+        if (!DiademaPanel._isSessionFolder(folder)) return;
+        DiademaPanel.mountPanelForFolder(folder);
     },
 
     // ── Handler bottone Run ───────────────────────────────────────────────────

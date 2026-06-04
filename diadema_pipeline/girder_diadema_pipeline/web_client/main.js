@@ -44,13 +44,13 @@ events.on('g:navigateTo', function (viewClass, settings) {
     if (settings && settings.folder) {
         const folder = settings.folder;
         const name = folder.get('name') || '';
+        console.log('[diadema] g:navigateTo folder:', name);
         if (DiademaPanel._isSessionFolderName(name)) {
             setTimeout(() => DiademaPanel.mountPanelForFolder(folder), 150);
         } else {
             $('.g-diadema-panel[data-diadema-mode="session"]').remove();
         }
     } else {
-        // Navigazione verso una vista non-folder: rimuovi panel sessione
         $('.g-diadema-panel[data-diadema-mode="session"]').remove();
     }
 });
@@ -58,6 +58,7 @@ events.on('g:navigateTo', function (viewClass, settings) {
 // Caso B: navigazione in-place nel HierarchyWidget
 // Route format: "collection/{id}/folder/{folderId}" o "folder/{id}/folder/{folderId}"
 events.on('g:hierarchy.route', function ({ route }) {
+    console.log('[diadema] g:hierarchy.route:', route);
     const match = (route || '').match(/folder\/([a-f0-9]{24})$/);
     if (!match) {
         $('.g-diadema-panel[data-diadema-mode="session"]').remove();
@@ -65,15 +66,15 @@ events.on('g:hierarchy.route', function ({ route }) {
     }
     const folderId = match[1];
 
-    // Aspettiamo che il breadcrumb sia aggiornato nel DOM
     setTimeout(() => {
         const $bar = $('.g-hierarchy-breadcrumb-bar');
         const folderName = $bar.find('ol>li:last-child a').first().text().trim()
                         || $bar.find('ol>li:last-child').first().text().trim();
+        console.log('[diadema] folder rilevata:', folderName, 'isSession:', DiademaPanel._isSessionFolderName(folderName));
 
         const existing = $('.g-diadema-panel[data-diadema-mode="session"]');
         if (DiademaPanel._isSessionFolderName(folderName)) {
-            if (existing.data('diadema-id') === folderId) return; // già montato
+            if (existing.data('diadema-id') === folderId) return;
             existing.remove();
             DiademaPanel.mountPanelByIdAndName(folderId, folderName);
         } else {

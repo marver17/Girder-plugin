@@ -1,12 +1,11 @@
-# Pinned: digest dell'immagine MRIQC v25.1.0.dev45 attualmente deployata
-# ("latest" non è riproducibile e può rompere la compatibilità al rebuild)
-FROM nipreps/mriqc@sha256:e4b8800c8fb716dc81ae6c7cf2009b4da09eec8ae3caba8aa2083ed4fa94d100
+# DIADEMA LST-AI worker — Celery worker sulla coda "lstai"
+# Base: jqmcginnis/lst-ai:v1.2.0 (Ubuntu 22.04, Python 3.10, torch cu121, CLI `lst`)
+FROM jqmcginnis/lst-ai:v1.2.0
 
-# Install git
-RUN apt-get update && apt-get install -qy git && \
-    apt-get clean && rm -rf /var/lib/apt/lists/*
+# Il task diadema invoca `lst_ai`; l'immagine espone la CLI come `lst`
+RUN ln -s /usr/local/bin/lst /usr/local/bin/lst_ai
 
-# Pinned al commit girder usato da server e worker (v5.0.10-4-g203cd86a4)
+# Clone Girder pinned allo stesso commit degli altri worker (v5.0.10-4-g203cd86a4)
 ARG GIRDER_REF=203cd86a409e0b3a88d619508b7372210ced7a60
 RUN git clone https://github.com/girder/girder.git /opt/girder && \
     git -C /opt/girder checkout ${GIRDER_REF}
@@ -29,7 +28,7 @@ ENTRYPOINT []
 CMD ["sh", "-c", \
      "pip install --no-cache-dir --no-build-isolation --no-deps -e /opt/diadema_pipeline && \
       celery -A girder_worker.app worker \
-        --queues=diadema_mriqc \
+        --queues=lstai \
         --loglevel=info \
         --pool=solo \
         --concurrency=1 \

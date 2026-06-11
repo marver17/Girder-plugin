@@ -1,13 +1,16 @@
-FROM nipreps/mriqc:latest
+# Pinned: digest of the currently deployed MRIQC image (v25.1.0.dev45)
+# ("latest" is not reproducible and may break compatibility on rebuild)
+FROM nipreps/mriqc@sha256:e4b8800c8fb716dc81ae6c7cf2009b4da09eec8ae3caba8aa2083ed4fa94d100
 
 # Install git (needed to clone girder repos)
 RUN apt-get update && apt-get install -qy git && \
     apt-get clean && rm -rf /var/lib/apt/lists/*
 
-# Clone Girder v4-integration branch (same as the main Girder container)
+# Clone Girder pinned to the same commit used by the server and other workers
 # Provides: girder-client, girder-worker, girder-plugin-worker
-RUN git clone --single-branch \
-    https://github.com/girder/girder.git /opt/girder
+ARG GIRDER_REF=203cd86a409e0b3a88d619508b7372210ced7a60
+RUN git clone https://github.com/girder/girder.git /opt/girder && \
+    git -C /opt/girder checkout ${GIRDER_REF}
 
 # Build tools needed for editable installs
 RUN pip install --no-cache-dir setuptools setuptools_scm wheel

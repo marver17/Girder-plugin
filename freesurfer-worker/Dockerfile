@@ -24,9 +24,10 @@ ENV PATH="/opt/conda/bin:$PATH"
 
 RUN conda install -y python=3.10 pip && conda clean -afy
 
-# Clone Girder v4-integration (stesso branch del container principale)
-RUN git clone  --single-branch \
-    https://github.com/girder/girder.git /opt/girder
+# Clone Girder pinned allo stesso commit del container principale
+ARG GIRDER_REF=203cd86a409e0b3a88d619508b7372210ced7a60
+RUN git clone https://github.com/girder/girder.git /opt/girder && \
+    git -C /opt/girder checkout ${GIRDER_REF}
 
 # Build tools
 RUN pip install --no-cache-dir setuptools setuptools_scm wheel

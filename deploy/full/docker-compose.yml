@@ -213,23 +213,24 @@ services:
     user: girder
     restart: unless-stopped
 
-  # ── MRIQC worker ────────────────────────────────────────────────────────────
+  # ── MRIQC worker (DEPRECATO: duplicava DIADEMA MRIQC, usare
+  #    diadema-mriqc-worker; decommentare solo per i vecchi endpoint nifti_qc) ──
 
-  mriqc-worker:
-    build:
-      context: ../../
-      dockerfile: mriqc-worker/Dockerfile
-    image: diadema-mriqc-worker:latest
-    container_name: diadema-full-mriqc-worker
-    networks: [diadema-full-net]
-    <<: *worker-deps
-    environment:
-      <<: *celery-env
-      C_FORCE_ROOT: "1"
-      GIRDER_API_URL: "http://girder:8080/api/v1"
-    volumes:
-      - ../../nifti_qc:/opt/nifti_qc
-    restart: unless-stopped
+  # mriqc-worker:
+  #   build:
+  #     context: ../../
+  #     dockerfile: mriqc-worker/Dockerfile
+  #   image: diadema-mriqc-worker:latest
+  #   container_name: diadema-full-mriqc-worker
+  #   networks: [diadema-full-net]
+  #   <<: *worker-deps
+  #   environment:
+  #     <<: *celery-env
+  #     C_FORCE_ROOT: "1"
+  #     GIRDER_API_URL: "http://girder:8080/api/v1"
+  #   volumes:
+  #     - ../../nifti_qc:/opt/nifti_qc
+  #   restart: unless-stopped
 
   # ── DIADEMA MRIQC worker ────────────────────────────────────────────────────
 
@@ -273,6 +274,34 @@ services:
       - ${FREESURFER_LICENSE_PATH:-./freesurfer_license.txt}:/usr/local/freesurfer/license.txt:ro
     restart: unless-stopped
 
+  # ── LST-AI worker ───────────────────────────────────────────────────────────
+
+  diadema-lstai-worker:
+    build:
+      context: ../../
+      dockerfile: lst-worker/Dockerfile
+    image: diadema-lstai-worker:latest
+    container_name: diadema-full-lstai-worker
+    networks: [diadema-full-net]
+    <<: *worker-deps
+    environment:
+      <<: *celery-env
+      C_FORCE_ROOT: "1"
+      GIRDER_API_URL: "http://girder:8080/api/v1"
+      DIADEMA_LSTAI_OUTPUT_DIR: /data/diadema/lstai
+    volumes:
+      - ../../diadema_pipeline:/opt/diadema_pipeline
+      - diadema_lstai_data:/data/diadema/lstai
+    restart: unless-stopped
+    # Decommentare su host con GPU NVIDIA (richiesto se si lancia con useGpu=true):
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: 1
+    #           capabilities: [gpu]
+
 # ─────────────────────────────────────────────────────────────────────────────
 
 networks:
@@ -293,5 +322,7 @@ volumes:
     name: diadema-full-mriqc-output
   diadema_subjects_data:
     name: diadema-full-freesurfer-subjects
+  diadema_lstai_data:
+    name: diadema-full-lstai-output
   trame_cache:
     name: diadema-full-trame-cache

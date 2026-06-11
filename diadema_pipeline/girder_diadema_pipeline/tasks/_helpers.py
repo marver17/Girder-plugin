@@ -195,9 +195,20 @@ def resolve_dir(explicit_path, env_var, default, label, task_name):
       3. valore di default hardcoded
 
     Crea la directory se non esiste e restituisce un oggetto pathlib.Path.
+
+    Hardening: il path esplicito (input utente via REST) viene risolto e deve
+    trovarsi sotto la radice dati consentita (DIADEMA_DATA_ROOT, default
+    /data/diadema) per impedire path traversal.
     """
+    allowed_root = Path(os.environ.get("DIADEMA_DATA_ROOT", "/data/diadema")).resolve()
     path_str = explicit_path or os.environ.get(env_var) or default
-    path = Path(path_str)
+    path = Path(path_str).resolve()
+    if explicit_path:
+        if path != allowed_root and allowed_root not in path.parents:
+            raise ValueError(
+                f"{label}: path '{path}' fuori dalla radice consentita "
+                f"{allowed_root}"
+            )
     path.mkdir(parents=True, exist_ok=True)
     logger.info("[%s] %s: %s", task_name, label, path)
     return path

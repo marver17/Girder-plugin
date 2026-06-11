@@ -6,6 +6,8 @@ che accetta i parametri del tool e li invia alla coda Celery corretta.
 
 import logging
 import os
+import re
+import shlex
 
 import cherrypy
 from girder.api import access
@@ -44,6 +46,75 @@ _TOOL_CONFIG = {
         "result_field": "diadema_lstai",
     },
 }
+
+
+# ── Validazione input (protezione da injection / path traversal) ─────────────
+
+_ACTIVE_STATUSES = ("running", "queued", "processing", "uploading")
+_PARTICIPANT_LABEL_RE = re.compile(r"^[a-zA-Z0-9]{1,64}$")
+# Flag (-x/--x) o valore semplice (es. "-openmp 4"); niente path o shell-metachar
+_EXTRA_FLAG_RE = re.compile(r"^-{0,2}[A-Za-z0-9_=\-\.]+$")
+_ALLOWED_DIRECTIVES = (
+    "-all", "-autorecon1", "-autorecon2", "-autorecon3",
+    "-autorecon2-cp", "-autorecon2-wm",
+)
+_ALLOWED_HEMI = ("both", "lh", "rh")
+_ALLOWED_MODALITIES = ("T1w", "T2w", "bold", "dwi")
+_ALLOWED_INPUT_TYPES = ("T1+FLAIR", "T1 only")
+_ALLOWED_DIR_ROOT = os.environ.get("DIADEMA_DATA_ROOT", "/data/diadema")
+
+
+def _validate_choice(value, allowed, name):
+    if value and value not in allowed:
+        raise RestException(
+            f"Valore non valido per {name}: '{value}'. Ammessi: {list(allowed)}", 400
+        )
+
+
+def _validate_participant_label(label):
+    if label and not _PARTICIPANT_LABEL_RE.match(label):
+        raise RestException(
+            "participantLabel non valido: ammessi solo caratteri alfanumerici "
+            "(BIDS, max 64)", 400
+        )
+
+
+def _validate_output_dir(path_str, name):
+    """Le directory esplicite devono essere assolute e sotto la radice dati."""
+    if not path_str:
+        return
+    if ".." in path_str.split(os.sep) or not os.path.isabs(path_str):
+        raise RestException(f"{name} deve essere un path assoluto senza '..'", 400)
+    resolved = os.path.realpath(path_str)
+    if not (resolved == _ALLOWED_DIR_ROOT
+            or resolved.startswith(_ALLOWED_DIR_ROOT + os.sep)):
+        raise RestException(
+            f"{name} deve trovarsi sotto {_ALLOWED_DIR_ROOT}", 400
+        )
+
+
+def _validate_threshold(threshold):
+    if threshold is not None and not (0.0 <= threshold <= 1.0):
+        raise RestException(
+            f"threshold deve essere in [0.0, 1.0], ricevuto: {threshold}", 400
+        )
+
+
+def _validate_extra_flags(extra_flags, user):
+    """Flag extra recon-all: solo admin, formato whitelistato per token."""
+    if not (extra_flags or "").strip():
+        return
+    if not user.get("admin"):
+        raise RestException("extraFlags è riservato agli amministratori", 403)
+    try:
+        tokens = shlex.split(extra_flags)
+    except ValueError as exc:
+        raise RestException(f"extraFlags non parsabile: {exc}", 400)
+    for tok in tokens:
+        if not _EXTRA_FLAG_RE.match(tok):
+            raise RestException(
+                f"extraFlags contiene un token non ammesso: '{tok}'", 400
+            )
 
 
 def _worker_callback_url() -> str:
@@ -272,10 +343,42 @@ class DiademaResource(Resource):
                 400,
             )
 
-        # ── Controllo double-run (protezione lato server) ─────────────────────
-        if not force:
-            current_status = (item.get("diadema") or {}).get(toolId, {}).get("status")
-            if current_status in ("running", "queued", "processing"):
+        # ── Validazione input utente ──────────────────────────────────────────
+        _validate_participant_label(participantLabel)
+        _validate_choice(modality, _ALLOWED_MODALITIES, "modality")
+        _validate_choice(directive, _ALLOWED_DIRECTIVES, "directive")
+        _validate_choice(hemi, _ALLOWED_HEMI, "hemi")
+        _validate_choice(inputType, _ALLOWED_INPUT_TYPES, "inputType")
+        _validate_output_dir(outputBaseDir, "outputBaseDir")
+        _validate_output_dir(subjectsDir, "subjectsDir")
+        _validate_extra_flags(extraFlags, self.getCurrentUser())
+        _validate_threshold(threshold)
+        # ─────────────────────────────────────────────────────────────────────
+
+        # ── Controllo double-run: claim atomico dello stato 'queued' ──────────
+        # Un update condizionale evita la race check-then-set fra richieste
+        # concorrenti: solo una transizione a 'queued' può riuscire.
+        if force:
+            Item().update(
+                {"_id": item["_id"]},
+                {"$set": {f"diadema.{toolId}.status": "queued"}},
+                multi=False,
+            )
+        else:
+            res = Item().update(
+                {
+                    "_id": item["_id"],
+                    f"diadema.{toolId}.status": {"$nin": list(_ACTIVE_STATUSES)},
+                },
+                {"$set": {f"diadema.{toolId}.status": "queued"}},
+                multi=False,
+            )
+            if res.matched_count == 0:
+                current_status = (
+                    (Item().load(item["_id"], force=True).get("diadema") or {})
+                    .get(toolId, {})
+                    .get("status")
+                )
                 raise RestException(
                     f"Un job '{toolId}' è già in corso su questo item "
                     f"(stato: {current_status}). Usa force=true per forzare.",
@@ -328,12 +431,6 @@ class DiademaResource(Resource):
         else:  # lstai
             from .tasks import run_lstai_task as celery_task
 
-            # Validazione threshold
-            if not (0.0 <= threshold <= 1.0):
-                raise RestException(
-                    f"threshold deve essere nell'intervallo [0.0, 1.0], ricevuto: {threshold}",
-                    400,
-                )
             task_kwargs = dict(
                 participant_label=participantLabel,
                 input_type=inputType,
@@ -343,6 +440,31 @@ class DiademaResource(Resource):
                 output_base_dir=_settings_lstai_dir or None,
             )
 
+        # Da qui in poi lo stato 'queued' è già stato rivendicato: in caso di
+        # errore prima del dispatch va rilasciato, altrimenti l'item resta
+        # bloccato e i run successivi ricevono 409.
+        try:
+            file_doc, celery_job, job_id = self._dispatchTool(
+                item, toolId, cfg, fileId, celery_task, task_kwargs
+            )
+        except Exception:
+            Item().update(
+                {"_id": item["_id"]},
+                {"$set": {f"diadema.{toolId}.status": "error"}},
+                multi=False,
+            )
+            raise
+
+        return {
+            "job_id": job_id,
+            "celery_task_id": celery_job.id,
+            "item_id": str(item["_id"]),
+            "tool": toolId,
+            "status": "queued",
+        }
+
+    def _dispatchTool(self, item, toolId, cfg, fileId, celery_task, task_kwargs):
+        """Risolve il file, crea Job/token e invia il task Celery."""
         # Trova il file
         if fileId:
             file_doc = File().load(
@@ -421,13 +543,7 @@ class DiademaResource(Resource):
 
         Job().updateJob(job, otherFields={"celeryTaskId": celery_job.id})
 
-        return {
-            "job_id": job_id,
-            "celery_task_id": celery_job.id,
-            "item_id": str(item["_id"]),
-            "tool": toolId,
-            "status": "queued",
-        }
+        return file_doc, celery_job, job_id
 
     @access.user(scope=TokenScope.DATA_READ)
     @autoDescribeRoute(
@@ -935,14 +1051,45 @@ class DiademaResource(Resource):
                 f"Tool non supportato: '{toolId}'. Valori ammessi: {list(_TOOL_CONFIG)}", 400
             )
 
-        if not force:
-            current_status = (folder.get("diadema") or {}).get(toolId, {}).get("status")
-            if current_status in ("running", "queued", "processing"):
+        # ── Validazione input utente ──────────────────────────────────────────
+        _validate_participant_label(participantLabel)
+        _validate_choice(modality, _ALLOWED_MODALITIES, "modality")
+        _validate_choice(directive, _ALLOWED_DIRECTIVES, "directive")
+        _validate_choice(hemi, _ALLOWED_HEMI, "hemi")
+        _validate_output_dir(outputBaseDir, "outputBaseDir")
+        _validate_output_dir(subjectsDir, "subjectsDir")
+        _validate_extra_flags(extraFlags, self.getCurrentUser())
+        _validate_threshold(threshold)
+        # ─────────────────────────────────────────────────────────────────────
+
+        # ── Controllo double-run: claim atomico dello stato 'queued' ──────────
+        if force:
+            Folder().update(
+                {"_id": folder["_id"]},
+                {"$set": {f"diadema.{toolId}.status": "queued"}},
+                multi=False,
+            )
+        else:
+            res = Folder().update(
+                {
+                    "_id": folder["_id"],
+                    f"diadema.{toolId}.status": {"$nin": list(_ACTIVE_STATUSES)},
+                },
+                {"$set": {f"diadema.{toolId}.status": "queued"}},
+                multi=False,
+            )
+            if res.matched_count == 0:
+                current_status = (
+                    (Folder().load(folder["_id"], force=True).get("diadema") or {})
+                    .get(toolId, {})
+                    .get("status")
+                )
                 raise RestException(
                     f"Un job '{toolId}' è già in corso su questa sessione "
                     f"(stato: {current_status}). Usa force=true per forzare.",
                     409,
                 )
+        # ─────────────────────────────────────────────────────────────────────
 
         from .settings import PluginSettings
 
@@ -991,10 +1138,6 @@ class DiademaResource(Resource):
         else:  # lstai
             from .tasks import run_lstai_task as celery_task
 
-            if not (0.0 <= threshold <= 1.0):
-                raise RestException(
-                    f"threshold deve essere in [0.0, 1.0], ricevuto: {threshold}", 400
-                )
             task_kwargs = dict(
                 session_folder_id=str(folder["_id"]),
                 participant_label=participantLabel,
@@ -1006,6 +1149,23 @@ class DiademaResource(Resource):
             )
 
         current_user = self.getCurrentUser()
+        folder_id = str(folder["_id"])
+        try:
+            return self._dispatchSessionTool(
+                folder, toolId, cfg, current_user, celery_task, task_kwargs
+            )
+        except Exception:
+            # Rilascia il claim 'queued' per non bloccare i run successivi
+            Folder().update(
+                {"_id": folder["_id"]},
+                {"$set": {f"diadema.{toolId}.status": "error"}},
+                multi=False,
+            )
+            raise
+
+    def _dispatchSessionTool(self, folder, toolId, cfg, current_user,
+                             celery_task, task_kwargs):
+        """Crea Job/token e invia il task Celery a livello sessione."""
         folder_id = str(folder["_id"])
         job = Job().createJob(
             title=f"{cfg['title_prefix']} – {folder['name']} (sessione)",

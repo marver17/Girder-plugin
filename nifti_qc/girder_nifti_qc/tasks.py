@@ -1,6 +1,13 @@
 """
 Celery tasks for NIfTI Quality Control using MRIQC
 
+DEPRECATED: run_mriqc_task duplicates the maintained DIADEMA MRIQC pipeline
+(girder_diadema_pipeline.tasks.mriqc, queue 'diadema_mriqc'). The dedicated
+'mriqc-worker' service has been disabled in docker-compose; jobs submitted to
+the 'mriqc' queue will not be consumed unless that service is re-enabled.
+Use the diadema_pipeline endpoints instead. Bug fixes are applied only to the
+DIADEMA implementation.
+
 MRIQC Documentation: https://mriqc.readthedocs.io/
 Installation: pip install mriqc (local installation)
 """

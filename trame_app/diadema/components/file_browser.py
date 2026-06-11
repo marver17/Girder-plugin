@@ -62,22 +62,31 @@ class FileBrowserPanel:
     async def _load_item(self, item_id: str):
         """Fetch full item and switch to item detail view."""
         try:
-            item = self._gc.get(f"item/{item_id}")
-            self.state.current_item_id = item_id
-            self.state.current_item = item
+            item = await self._gc.aget(f"item/{item_id}")
 
             # Detect pipeline scope for this item
             scope, target_ids, scope_label = await detect_scope(
                 self._gc, item_id=item_id, resource_type="item"
             )
-            self.state.pipeline_scope = scope
-            self.state.pipeline_target_ids = target_ids
-            self.state.pipeline_scope_label = scope_label
 
-            self.state.active_view = "item"
+            # State mutations from a background task must be flushed explicitly
+            with self.state:
+                self.state.current_item_id = item_id
+                self.state.current_item = item
+                self.state.pipeline_scope = scope
+                self.state.pipeline_target_ids = target_ids
+                self.state.pipeline_scope_label = scope_label
+                self.state.active_view = "item"
+
+            # Resume tracking of any in-flight pipeline jobs on this item
+            if self.ctrl.on_item_loaded.exists():
+                self.ctrl.on_item_loaded(item)
+
             self.ctrl.on_load_volume(item)
         except Exception as e:
             print(f"[file_browser] Error loading item {item_id}: {e}")
+            with self.state:
+                self.state.ui_error = {"message": f"Failed to load item: {e}"}
 
     async def _inspect_folder(self, folder_id: str, folder: dict):
         """Inspect a folder to detect if it's a subject or dataset, update pipeline scope."""
@@ -85,10 +94,11 @@ class FileBrowserPanel:
             scope, target_ids, scope_label = await detect_scope(
                 self._gc, folder_id=folder_id, resource_type="folder", folder=folder
             )
-            self.state.pipeline_scope = scope
-            self.state.pipeline_target_ids = target_ids
-            self.state.pipeline_scope_label = scope_label
-            # Keep current_item_id as-is; folder selection doesn't open item view
+            with self.state:
+                self.state.pipeline_scope = scope
+                self.state.pipeline_target_ids = target_ids
+                self.state.pipeline_scope_label = scope_label
+                # Keep current_item_id as-is; folder selection doesn't open item view
         except Exception as e:
             print(f"[file_browser] Error inspecting folder {folder_id}: {e}")
 

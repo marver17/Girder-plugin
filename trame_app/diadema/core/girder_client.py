@@ -5,6 +5,8 @@ A single instance is maintained per Trame server session.
 It is re-initialized whenever the auth token changes (login/logout).
 """
 
+import asyncio
+
 import girder_client
 
 from diadema.config import GIRDER_API_URL
@@ -34,6 +36,29 @@ class DiademaGirderClient:
 
     def download_file(self, file_id: str, dest_path: str) -> None:
         self._gc.downloadFile(file_id, dest_path)
+
+    # ── Async variants ─────────────────────────────────────────────────────
+    # girder_client is synchronous; these delegate to a worker thread so the
+    # Trame asyncio event loop never blocks on network I/O.
+
+    async def aget(self, path: str, parameters: dict | None = None):
+        return await asyncio.to_thread(self._gc.get, path, parameters=parameters)
+
+    async def apost(self, path: str, parameters: dict | None = None, data=None, json=None):
+        return await asyncio.to_thread(
+            self._gc.post, path, parameters=parameters, data=data, json=json
+        )
+
+    async def aput(self, path: str, parameters: dict | None = None, data=None, json=None):
+        return await asyncio.to_thread(
+            self._gc.put, path, parameters=parameters, data=data, json=json
+        )
+
+    async def adelete(self, path: str, parameters: dict | None = None):
+        return await asyncio.to_thread(self._gc.delete, path, parameters=parameters)
+
+    async def adownload_file(self, file_id: str, dest_path: str) -> None:
+        await asyncio.to_thread(self._gc.downloadFile, file_id, dest_path)
 
     @property
     def raw(self) -> girder_client.GirderClient:

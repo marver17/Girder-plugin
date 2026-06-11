@@ -248,7 +248,7 @@ services:
       GIRDER_API_URL: "http://girder:8080/api/v1"
       DIADEMA_MRIQC_OUTPUT_DIR: /data/diadema/mriqc
     volumes:
-      - ../../diadema_pipeline:/opt/diadema_pipeline
+      # Il plugin è baked nell'immagine (install non-editable al build)
       - diadema_mriqc_data:/data/diadema/mriqc
     restart: unless-stopped
 
@@ -269,7 +269,7 @@ services:
       FS_LICENSE: /usr/local/freesurfer/license.txt
       DIADEMA_SUBJECTS_DIR: /data/diadema/subjects
     volumes:
-      - ../../diadema_pipeline:/opt/diadema_pipeline
+      # Il plugin è baked nell'immagine (install non-editable al build)
       - diadema_subjects_data:/data/diadema/subjects
       - ${FREESURFER_LICENSE_PATH:-./freesurfer_license.txt}:/usr/local/freesurfer/license.txt:ro
     restart: unless-stopped
@@ -290,7 +290,7 @@ services:
       GIRDER_API_URL: "http://girder:8080/api/v1"
       DIADEMA_LSTAI_OUTPUT_DIR: /data/diadema/lstai
     volumes:
-      - ../../diadema_pipeline:/opt/diadema_pipeline
+      # Il plugin è baked nell'immagine (install non-editable al build)
       - diadema_lstai_data:/data/diadema/lstai
     restart: unless-stopped
     # Decommentare su host con GPU NVIDIA (richiesto se si lancia con useGpu=true):

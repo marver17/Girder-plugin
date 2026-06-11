@@ -26,8 +26,10 @@ install_plugins() {
         "$WORKSPACE/nifti_viewer" \
         "$WORKSPACE/diadema_pipeline"; do
         if [ -f "$plugin/pyproject.toml" ] || [ -f "$plugin/setup.py" ]; then
-            # Evita conflitti setuptools su riavvii ripetuti (workspace montato)
-            rm -rf "$plugin/build" "$plugin"/*.egg-info
+            # Evita conflitti setuptools su riavvii ripetuti (workspace montato).
+            # Non fatale: un egg-info root-owned (creato da un worker) non deve
+            # impedire l'avvio del container.
+            rm -rf "$plugin/build" "$plugin"/*.egg-info 2>/dev/null || true
             echo "  pip install $plugin"
             pip install --break-system-packages -q --no-build-isolation $PIP_NO_PEP517_FLAG \
                 "$plugin"

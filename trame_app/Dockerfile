@@ -28,7 +28,7 @@ COPY pyproject.toml .
 RUN mkdir -p diadema && touch diadema/__init__.py && \
     pip install --no-cache-dir ".[dev]" && \
     pip install --no-cache-dir \
-        "girdermedviewer @ git+https://github.com/KitwareMedical/GirderMedViewer.git"
+        "girdermedviewer @ git+https://github.com/KitwareMedical/GirderMedViewer.git@a2ff8d652bfd51d12bed3ded450bd1ddb58d969d"
 
 # Patch upstream bug: set_vector_field_arrow_length and set_vector_field_arrow_thickness
 # are imported in __init__.py but missing from vtk_utils.py

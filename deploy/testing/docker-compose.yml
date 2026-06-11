@@ -211,6 +211,12 @@ services:
     volumes:
       - ../../diadema_pipeline:/opt/diadema_pipeline
       - diadema_mriqc_data:/data/diadema/mriqc
+    # Testing: reinstalla in editable mode dal volume (live-edit di tasks.py).
+    command: >
+      sh -c "pip install --no-cache-dir --no-build-isolation --no-deps -e /opt/diadema_pipeline &&
+             celery -A girder_worker.app worker --queues=diadema_mriqc --loglevel=info
+             --pool=solo --concurrency=1 --heartbeat-interval=0
+             --include=girder_diadema_pipeline.tasks"
     restart: unless-stopped
 
   # ── FreeSurfer worker – coda 'freesurfer' ─────────────────────────────────
@@ -234,6 +240,12 @@ services:
       - diadema_subjects_data:/data/diadema/subjects
       # Licenza FreeSurfer dall'host (percorso configurato in .env)
       - ${FREESURFER_LICENSE_PATH:-./license.txt}:/usr/local/freesurfer/license.txt:ro
+    # Testing: reinstalla in editable mode dal volume (live-edit di tasks.py).
+    command: >
+      sh -c "pip install --no-cache-dir --no-build-isolation --no-deps -e /opt/diadema_pipeline &&
+             celery -A girder_worker.app worker --queues=freesurfer --loglevel=info
+             --pool=solo --concurrency=1 --heartbeat-interval=0
+             --include=girder_diadema_pipeline.tasks"
     restart: unless-stopped
 
 # ─────────────────────────────────────────────────────────────────────────────

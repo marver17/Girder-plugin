@@ -29,27 +29,30 @@ ARG GIRDER_REF=203cd86a409e0b3a88d619508b7372210ced7a60
 RUN git clone https://github.com/girder/girder.git /opt/girder && \
     git -C /opt/girder checkout ${GIRDER_REF}
 
-# Build tools
-RUN pip install --no-cache-dir setuptools setuptools_scm wheel
+# Build tools (--upgrade: setuptools di sistema può essere <61 e non leggere
+# i metadati PEP 621, producendo un pacchetto "UNKNOWN")
+RUN pip install --upgrade --no-cache-dir setuptools setuptools_scm wheel
 
 # Stack girder_worker (senza server web)
 RUN pip install --no-cache-dir -e /opt/girder/clients/python
 RUN pip install --no-cache-dir -e /opt/girder/worker
 RUN pip install --no-cache-dir -e /opt/girder/plugins/worker
 
-# diadema_pipeline è montato come volume a /opt/diadema_pipeline
-# e installato in editable mode all'avvio (live-edit di tasks.py senza rebuild)
+# Plugin diadema_pipeline baked nell'immagine (install non-editable).
+# Per il live-edit in dev, i compose dev/testing montano il sorgente su
+# /opt/diadema_pipeline e sovrascrivono `command:` con una pip install -e.
+COPY diadema_pipeline /opt/diadema_pipeline
+RUN rm -rf /opt/diadema_pipeline/build /opt/diadema_pipeline/*.egg-info && \
+    pip install --no-cache-dir --no-build-isolation --no-deps /opt/diadema_pipeline
 
 WORKDIR /opt
 
 ENTRYPOINT []
 
-CMD ["sh", "-c", \
-     "pip install --no-cache-dir --no-build-isolation --no-deps -e /opt/diadema_pipeline && \
-      celery -A girder_worker.app worker \
-        --queues=freesurfer \
-        --loglevel=info \
-        --pool=solo \
-        --concurrency=1 \
-        --heartbeat-interval=0 \
-        --include=girder_diadema_pipeline.tasks"]
+CMD ["celery", "-A", "girder_worker.app", "worker", \
+     "--queues=freesurfer", \
+     "--loglevel=info", \
+     "--pool=solo", \
+     "--concurrency=1", \
+     "--heartbeat-interval=0", \
+     "--include=girder_diadema_pipeline.tasks"]

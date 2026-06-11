@@ -153,6 +153,13 @@ services:
     volumes:
       - ./diadema_pipeline:/opt/diadema_pipeline
       - diadema_mriqc_data:/data/diadema/mriqc # output persistente
+    # Dev: reinstalla in editable mode dal volume (live-edit di tasks.py).
+    # L'immagine contiene già il plugin baked per il deploy.
+    command: >
+      sh -c "pip install --no-cache-dir --no-build-isolation --no-deps -e /opt/diadema_pipeline &&
+             celery -A girder_worker.app worker --queues=diadema_mriqc --loglevel=info
+             --pool=solo --concurrency=1 --heartbeat-interval=0
+             --include=girder_diadema_pipeline.tasks"
     restart: unless-stopped
 
   # DIADEMA – FreeSurfer worker (freesurfer/freesurfer:8.1.0, coda freesurfer)
@@ -181,6 +188,12 @@ services:
     volumes:
       - ./diadema_pipeline:/opt/diadema_pipeline
       - diadema_subjects_data:/data/diadema/subjects # output persistente
+    # Dev: reinstalla in editable mode dal volume (live-edit di tasks.py).
+    command: >
+      sh -c "pip install --no-cache-dir --no-build-isolation --no-deps -e /opt/diadema_pipeline &&
+             celery -A girder_worker.app worker --queues=freesurfer --loglevel=info
+             --pool=solo --concurrency=1 --heartbeat-interval=0
+             --include=girder_diadema_pipeline.tasks"
     restart: unless-stopped
 
   # DIADEMA – LST-AI worker (jqmcginnis/lst-ai:v1.2.0, coda lstai)
@@ -208,6 +221,12 @@ services:
     volumes:
       - ./diadema_pipeline:/opt/diadema_pipeline
       - diadema_lstai_data:/data/diadema/lstai # output persistente
+    # Dev: reinstalla in editable mode dal volume (live-edit di tasks.py).
+    command: >
+      sh -c "pip install --no-cache-dir --no-build-isolation --no-deps -e /opt/diadema_pipeline &&
+             celery -A girder_worker.app worker --queues=lstai --loglevel=info
+             --pool=solo --concurrency=1 --heartbeat-interval=0
+             --include=girder_diadema_pipeline.tasks"
     restart: unless-stopped
     # Decommentare su host con GPU NVIDIA (richiesto se si lancia con useGpu=true):
     # deploy:

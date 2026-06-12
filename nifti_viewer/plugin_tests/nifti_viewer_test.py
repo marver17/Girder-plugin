@@ -146,9 +146,12 @@ def test_parse_nifti_with_json(server, user, admin, folder, sample_nifti_file, s
     assert json_meta['EchoTime'] == 0.03
     assert json_meta['Manufacturer'] == 'TestScanner'
     
-    # Check that both files are referenced
-    assert item['nifti']['files']['nifti'] is not None
-    assert item['nifti']['files']['json'] is not None
+    # Check that both files are referenced (files è una lista di dict)
+    files = item['nifti']['files']
+    assert isinstance(files, list)
+    names = {f['name'] for f in files}
+    assert 'test.nii.gz' in names
+    assert 'test.json' in names
 
 
 def test_nifti_search_handler(server, admin, folder, sample_nifti_file, sample_json_metadata):
@@ -186,40 +189,44 @@ def test_nifti_search_handler(server, admin, folder, sample_nifti_file, sample_j
         user=admin
     )
 
+    # Il search handler ritorna {"item": [ ...item dicts... ]}
+    def _ids(query):
+        results = niftiSubstringSearchHandler(
+            query=query, types=['item'], user=admin, level=None
+        )
+        return {str(i['_id']) for i in results['item']}
+
     # Test 1: Ricerca per filename
-    results = niftiSubstringSearchHandler(
-        query='brain', types=['item'], user=admin, level=None
-    )
-    assert len(results) > 0
-    assert any(r['document']['_id'] == item['_id'] for r in results)
-
+    assert str(item['_id']) in _ids('brain')
     # Test 2: Ricerca per BIDS ProtocolName
-    results = niftiSubstringSearchHandler(
-        query='T1_MPRAGE', types=['item'], user=admin, level=None
-    )
-    assert len(results) > 0
-    assert any(r['document']['_id'] == item['_id'] for r in results)
-
+    assert str(item['_id']) in _ids('T1_MPRAGE')
     # Test 3: Ricerca per BIDS Manufacturer
-    results = niftiSubstringSearchHandler(
-        query='TestScanner', types=['item'], user=admin, level=None
-    )
-    assert len(results) > 0
-    assert any(r['document']['_id'] == item['_id'] for r in results)
-
+    assert str(item['_id']) in _ids('TestScanner')
     # Test 4: Ricerca case-insensitive
-    results = niftiSubstringSearchHandler(
-        query='mprage', types=['item'], user=admin, level=None
-    )
-    assert len(results) > 0
-    assert any(r['document']['_id'] == item['_id'] for r in results)
-
+    assert str(item['_id']) in _ids('mprage')
     # Test 5: Ricerca valore numerico nelle dimensioni
-    results = niftiSubstringSearchHandler(
-        query='64', types=['item'], user=admin, level=None
-    )
-    assert len(results) > 0
-    assert any(r['document']['_id'] == item['_id'] for r in results)
+    assert str(item['_id']) in _ids('64')
+
+
+def test_search_conditions_escape_regex():
+    """La query utente deve essere escapata prima di finire negli operatori
+    MongoDB $regex: metacaratteri come '.*' o '[z-a]' non devono causare ReDoS,
+    match arbitrari o regex non valide."""
+    import re
+
+    from girder_nifti_viewer import _buildSearchConditions
+
+    for query in ['.*', 'a(b', 'a|b', '[z-a]', '^$']:
+        conditions = _buildSearchConditions(query)
+        regex_values = []
+        for cond in conditions:
+            value = next(iter(cond.values()))
+            if isinstance(value, dict) and '$regex' in value:
+                regex_values.append(value['$regex'])
+        assert regex_values, f'attese condizioni $regex per query {query!r}'
+        # Ogni $regex deve essere la versione escapata della query (letterale)
+        for rv in regex_values:
+            assert rv == re.escape(query)
 
 
 def test_auto_parse_on_upload(server, admin, folder, sample_nifti_file):

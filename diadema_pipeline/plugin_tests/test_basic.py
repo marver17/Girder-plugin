@@ -106,7 +106,7 @@ def test_settings_get_defaults(server, fsAssetstore, admin_user):
     assert body["diadema.output_storage"] == "item"
     assert "diadema.widget_enabled" in body
     assert body["diadema.widget_enabled"]["mriqc"] is True
-    assert body["diadema.widget_enabled"]["lstai"] is False
+    assert body["diadema.widget_enabled"]["lstai"] is True
 
 
 def test_settings_update_and_read(server, fsAssetstore, admin_user):
@@ -206,9 +206,9 @@ def test_task_mriqc_skips_if_job_terminal(monkeypatch):
             # Simula job già in SUCCESS (status=3)
             return {"status": 3}
 
-    import girder_diadema_pipeline.tasks._helpers as helpers_module
-
-    monkeypatch.setattr(helpers_module, "GirderClient", _FakeGC, raising=False)
+    # idempotency_guard fa `from girder_client import GirderClient` localmente:
+    # va quindi patchato l'attributo sul modulo girder_client.
+    monkeypatch.setattr("girder_client.GirderClient", _FakeGC)
 
     result = run_mriqc_task.run(
         _FakeTask(),
@@ -242,9 +242,7 @@ def test_task_freesurfer_skips_if_job_terminal(monkeypatch):
         def get(self, path):
             return {"status": 5}  # CANCELLED
 
-    import girder_diadema_pipeline.tasks._helpers as helpers_module
-
-    monkeypatch.setattr(helpers_module, "GirderClient", _FakeGC, raising=False)
+    monkeypatch.setattr("girder_client.GirderClient", _FakeGC)
 
     result = run_freesurfer_task.run(
         _FakeTask(),
@@ -258,9 +256,10 @@ def test_task_freesurfer_skips_if_job_terminal(monkeypatch):
     assert result["status"] == "skipped"
 
 
-def test_lstai_returns_not_implemented(monkeypatch):
+def test_task_lstai_skips_if_job_terminal(monkeypatch):
     """
-    run_lstai_task deve ritornare not_implemented senza lanciare eccezioni non gestite.
+    run_lstai_task (ora implementato) deve uscire subito con status 'skipped'
+    se il job è già in stato terminale, senza eseguire lst_ai.
     """
     from girder_diadema_pipeline.tasks import run_lstai_task
 
@@ -269,8 +268,6 @@ def test_lstai_returns_not_implemented(monkeypatch):
             girder_client_token = "fake_token"
             girder_api_url = "http://girder:8080/api/v1"
 
-    calls = {}
-
     class _FakeGC:
         def __init__(self, **kwargs):
             pass
@@ -278,17 +275,9 @@ def test_lstai_returns_not_implemented(monkeypatch):
         token = None
 
         def get(self, path):
-            return {"status": 0}  # non terminale
+            return {"status": 5}  # CANCELLED (terminale)
 
-        def put(self, path, **kwargs):
-            calls[path] = kwargs
-
-    import girder_diadema_pipeline.tasks._helpers as helpers_module
-
-    monkeypatch.setattr(helpers_module, "GirderClient", _FakeGC, raising=False)
-    import girder_diadema_pipeline.tasks.lstai as lstai_module
-
-    monkeypatch.setattr(lstai_module, "GirderClient", _FakeGC, raising=False)
+    monkeypatch.setattr("girder_client.GirderClient", _FakeGC)
 
     result = run_lstai_task.run(
         _FakeTask(),
@@ -299,7 +288,7 @@ def test_lstai_returns_not_implemented(monkeypatch):
         job_token_id="fake_token",
     )
 
-    assert result["status"] == "not_implemented"
+    assert result["status"] == "skipped"
 
 
 # ── Test parser FreeSurfer ────────────────────────────────────────────────────
@@ -380,4 +369,109 @@ caudalanteriorcingulate  456  310  890  2.10  0.38  0.11  0.08  8  1
     finally:
         path.unlink(missing_ok=True)
 
-        path.unlink(missing_ok=True)
+
+# ── Test backstop time-limit Celery ───────────────────────────────────────────
+
+
+def test_tool_soft_time_limit_helper():
+    """_tool_soft_time_limit ricava il soft limit dal timeout del tool."""
+    from girder_diadema_pipeline.rest import _tool_soft_time_limit
+
+    assert _tool_soft_time_limit("mriqc", {"timeout": 1800}) == 1800
+    assert _tool_soft_time_limit("freesurfer", {"timeout": 14400}) == 14400
+    # LST-AI non passa un timeout esplicito → default del task
+    assert _tool_soft_time_limit("lstai", {}) == 3600
+    # Valori non numerici o non positivi → nessun limite imposto
+    assert _tool_soft_time_limit("mriqc", {"timeout": "abc"}) is None
+    assert _tool_soft_time_limit("mriqc", {"timeout": 0}) is None
+
+
+# ── Helper: crea un item scrivibile per un utente ─────────────────────────────
+
+
+def _make_item(owner, name="sub-001_T1w.nii.gz"):
+    from girder.models.folder import Folder
+    from girder.models.item import Item
+
+    folder = Folder().createFolder(
+        owner, "DiademaTest", parentType="user", creator=owner, reuseExisting=True
+    )
+    return Item().createItem(name, owner, folder)
+
+
+# ── Test claim atomico anti-double-run ────────────────────────────────────────
+
+
+def test_run_conflict_when_active(server, fsAssetstore, admin_user):
+    """Un run senza force su un item con tool già 'running' deve dare 409."""
+    from girder.models.item import Item
+
+    item = _make_item(admin_user)
+    Item().update(
+        {"_id": item["_id"]},
+        {"$set": {"diadema.mriqc.status": "running"}},
+        multi=False,
+    )
+    resp = server.request(
+        path=f"/api/v1/diadema_pipeline/{item['_id']}/run/mriqc",
+        method="POST",
+        user=admin_user,
+    )
+    assert resp.status.startswith("409")
+
+
+# ── Test validazione input ────────────────────────────────────────────────────
+
+
+def test_run_validation_bad_participant_label(server, fsAssetstore, admin_user):
+    """participantLabel non alfanumerico → 400 (prima del dispatch)."""
+    item = _make_item(admin_user)
+    resp = server.request(
+        path=f"/api/v1/diadema_pipeline/{item['_id']}/run/mriqc",
+        method="POST",
+        user=admin_user,
+        params={"participantLabel": "bad!!"},
+    )
+    assert resp.status == "400 Bad Request"
+
+
+def test_run_validation_bad_directive(server, fsAssetstore, admin_user):
+    """directive FreeSurfer fuori whitelist → 400."""
+    item = _make_item(admin_user)
+    resp = server.request(
+        path=f"/api/v1/diadema_pipeline/{item['_id']}/run/freesurfer",
+        method="POST",
+        user=admin_user,
+        params={"directive": "-evil"},
+    )
+    assert resp.status == "400 Bad Request"
+
+
+def test_extra_flags_requires_admin(server, fsAssetstore, user):
+    """extraFlags da utente non-admin → 403."""
+    item = _make_item(user)
+    resp = server.request(
+        path=f"/api/v1/diadema_pipeline/{item['_id']}/run/freesurfer",
+        method="POST",
+        user=user,
+        params={"extraFlags": "-foo"},
+    )
+    assert resp.status == "403 Forbidden"
+
+
+# ── Test ownership force_cancelled ────────────────────────────────────────────
+
+
+def test_force_cancelled_requires_ownership(server, fsAssetstore, admin_user, user):
+    """Un utente non può forzare a CANCELLED il job di un altro utente → 403."""
+    from girder_jobs.models.job import Job
+
+    job = Job().createJob(
+        title="owned-by-admin", type="diadema_mriqc", user=admin_user, public=False
+    )
+    resp = server.request(
+        path=f"/api/v1/diadema_pipeline/job/{job['_id']}/force_cancelled",
+        method="POST",
+        user=user,
+    )
+    assert resp.status == "403 Forbidden"

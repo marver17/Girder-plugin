@@ -78,7 +78,7 @@ class WidgetProviderBase:
         Return REST API endpoint pattern for fetching widget data.
 
         Returns:
-            str: Endpoint pattern (e.g., '/nifti_qc/{id}/results')
+            str: Endpoint pattern (e.g., '/diadema_pipeline/{id}/results')
                  or None if data is retrieved from item metadata
         """
         return None

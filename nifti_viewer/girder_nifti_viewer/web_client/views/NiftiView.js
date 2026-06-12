@@ -180,33 +180,12 @@ const NiftiView = View.extend({
             this._applyWindowLevel(level, this._currentWindow);
         }, 50);
 
-        // Re-render extension widgets when QC results change (e.g. after polling updates the model)
-        this.listenTo(this.item, 'change:nifti_qc_results', () => {
+        // Re-render extension widgets when DIADEMA results change (e.g. after
+        // polling updates the model). Extension widgets (incl. QC results) are
+        // contributed via the global widget registry by the diadema_pipeline plugin.
+        this.listenTo(this.item, 'change:diadema', () => {
             this._renderExtensionWidgets();
         });
-
-        // If QC results are not yet in the model, fetch them from the REST API.
-        // This handles the case where the item was already processed and the page
-        // is opened fresh — the model may not have nifti_qc_results loaded yet.
-        if (!this.item.get('nifti_qc_results')) {
-            restRequest({
-                url: `item/${this.item.id}`,
-                method: 'GET'
-            }).done((itemData) => {
-                // Support both exposeFields top-level and item.meta fallback
-                const qcResults = itemData.nifti_qc_results || itemData.meta?.nifti_qc_results;
-                const qcStatus = itemData.nifti_qc_status || itemData.meta?.nifti_qc_status;
-                console.log('[NIfTI Viewer] QC fetch — nifti_qc_results:', qcResults, '| nifti_qc_status:', qcStatus, '| raw meta:', itemData.meta);
-                if (qcResults) {
-                    console.log('[NIfTI Viewer] Found existing QC results, updating model');
-                    this.item.set({
-                        nifti_qc_results: qcResults,
-                        nifti_qc_status: qcStatus
-                    });
-                    // listenTo above will trigger _renderExtensionWidgets
-                }
-            });
-        }
 
         // Re-render extension widgets if a plugin registers after this view is already rendered
         this._onWidgetRegistered = () => {

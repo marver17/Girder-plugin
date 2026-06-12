@@ -25,6 +25,11 @@ from girder_jobs.models.job import Job
 
 logger = logging.getLogger(__name__)
 
+# Margine fra soft_time_limit (timeout applicativo del tool) e time_limit (kill
+# duro Celery): dà al task il tempo di gestire SoftTimeLimitExceeded, fare
+# cleanup e marcare lo stato 'error' prima dell'uccisione forzata del processo.
+_CELERY_TIMEOUT_MARGIN_S = 300
+
 # Tool supportati → coda Celery + task name (da aggiungere man mano)
 _TOOL_CONFIG = {
     "mriqc": {
@@ -115,6 +120,29 @@ def _validate_extra_flags(extra_flags, user):
             raise RestException(
                 f"extraFlags contiene un token non ammesso: '{tok}'", 400
             )
+
+
+def _tool_soft_time_limit(tool_id, task_kwargs):
+    """Ricava il soft time limit Celery (secondi) dal timeout applicativo del tool.
+
+    I task usano un proprio loop di polling per il timeout (meccanismo primario,
+    indipendente dal pool); questo è un backstop Celery nel caso il processo si
+    blocchi in modo che il poll non intercetti, o prima ancora che la subprocess
+    parta. NB: i time limit Celery sono effettivi solo con pool prefork; con
+    --pool=solo (config attuale dei worker) non vengono applicati, ma impostarli
+    è corretto-per-costruzione e diventa attivo se si passa a prefork.
+    Restituisce None se non determinabile (nessun limite imposto).
+    """
+    # Tutti i task espongono il timeout come kwarg "timeout"
+    # (freesurfer riceve fsTimeout già mappato su "timeout").
+    raw = task_kwargs.get("timeout")
+    if tool_id == "lstai" and not raw:
+        raw = 3600  # default del task LST-AI (non passa timeout esplicito)
+    try:
+        val = int(raw)
+        return val if val > 0 else None
+    except (TypeError, ValueError):
+        return None
 
 
 def _worker_callback_url() -> str:
@@ -443,9 +471,13 @@ class DiademaResource(Resource):
         # Da qui in poi lo stato 'queued' è già stato rivendicato: in caso di
         # errore prima del dispatch va rilasciato, altrimenti l'item resta
         # bloccato e i run successivi ricevono 409.
+        # Timeout applicativo del tool → backstop Celery (soft/hard time limit).
+        soft_limit = _tool_soft_time_limit(toolId, task_kwargs)
+
         try:
             file_doc, celery_job, job_id = self._dispatchTool(
-                item, toolId, cfg, fileId, celery_task, task_kwargs
+                item, toolId, cfg, fileId, celery_task, task_kwargs,
+                soft_time_limit=soft_limit,
             )
         except Exception:
             Item().update(
@@ -463,7 +495,8 @@ class DiademaResource(Resource):
             "status": "queued",
         }
 
-    def _dispatchTool(self, item, toolId, cfg, fileId, celery_task, task_kwargs):
+    def _dispatchTool(self, item, toolId, cfg, fileId, celery_task, task_kwargs,
+                      soft_time_limit=None):
         """Risolve il file, crea Job/token e invia il task Celery."""
         # Trova il file
         if fileId:
@@ -524,7 +557,7 @@ class DiademaResource(Resource):
             multi=False,
         )
 
-        celery_job = celery_task.apply_async(
+        apply_kwargs = dict(
             kwargs=dict(
                 item_id=str(item["_id"]),
                 file_id=str(file_doc["_id"]),
@@ -540,6 +573,11 @@ class DiademaResource(Resource):
             },
             queue=cfg["queue"],
         )
+        if soft_time_limit:
+            apply_kwargs["soft_time_limit"] = soft_time_limit
+            apply_kwargs["time_limit"] = soft_time_limit + _CELERY_TIMEOUT_MARGIN_S
+
+        celery_job = celery_task.apply_async(**apply_kwargs)
 
         Job().updateJob(job, otherFields={"celeryTaskId": celery_job.id})
 
@@ -766,6 +804,17 @@ class DiademaResource(Resource):
         job = Job().load(oid, force=True)
         if not job:
             raise RestException(f"Job {jobId} non trovato", 404)
+
+        # Solo il proprietario del job o un admin può forzarne la cancellazione:
+        # l'endpoint bypassa la validazione delle transizioni, quindi va protetto
+        # esplicitamente (modelParam non si applica a un jobId arbitrario).
+        user = self.getCurrentUser()
+        if not user.get("admin") and str(job.get("userId")) != str(user["_id"]):
+            raise RestException(
+                "Solo il proprietario del job o un amministratore può forzarne "
+                "la cancellazione",
+                403,
+            )
 
         # Aggiornamento diretto MongoDB — bypassa la validazione delle transizioni
         Job().update(
@@ -1150,9 +1199,11 @@ class DiademaResource(Resource):
 
         current_user = self.getCurrentUser()
         folder_id = str(folder["_id"])
+        soft_limit = _tool_soft_time_limit(toolId, task_kwargs)
         try:
             return self._dispatchSessionTool(
-                folder, toolId, cfg, current_user, celery_task, task_kwargs
+                folder, toolId, cfg, current_user, celery_task, task_kwargs,
+                soft_time_limit=soft_limit,
             )
         except Exception:
             # Rilascia il claim 'queued' per non bloccare i run successivi
@@ -1164,7 +1215,7 @@ class DiademaResource(Resource):
             raise
 
     def _dispatchSessionTool(self, folder, toolId, cfg, current_user,
-                             celery_task, task_kwargs):
+                             celery_task, task_kwargs, soft_time_limit=None):
         """Crea Job/token e invia il task Celery a livello sessione."""
         folder_id = str(folder["_id"])
         job = Job().createJob(
@@ -1208,7 +1259,7 @@ class DiademaResource(Resource):
             multi=False,
         )
 
-        celery_job = celery_task.apply_async(
+        apply_kwargs = dict(
             kwargs=dict(
                 job_id=job_id,
                 job_token_id=job_token_id,
@@ -1221,6 +1272,11 @@ class DiademaResource(Resource):
             },
             queue=cfg["queue"],
         )
+        if soft_time_limit:
+            apply_kwargs["soft_time_limit"] = soft_time_limit
+            apply_kwargs["time_limit"] = soft_time_limit + _CELERY_TIMEOUT_MARGIN_S
+
+        celery_job = celery_task.apply_async(**apply_kwargs)
 
         Job().updateJob(job, otherFields={"celeryTaskId": celery_job.id})
 

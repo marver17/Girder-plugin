@@ -142,8 +142,6 @@ def set_job_cancelled(gc, job_id, task_name):
             exc,
         )
         try:
-            # Ricava il base URL dal gc già configurato
-            base = gc.urlBase.rstrip("/")  # es. http://girder:8080/api/v1
             gc.post(f"diadema_pipeline/job/{job_id}/force_cancelled")
             logger.info("[%s] Job %s → CANCELLED (force)", task_name, job_id)
         except Exception as exc2:

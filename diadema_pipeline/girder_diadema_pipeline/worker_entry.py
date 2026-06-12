@@ -75,6 +75,22 @@ class DiademaWorkerPlugin:
         }
         self.app.conf.worker_cancel_long_running_tasks_on_connection_loss = True
 
+        # ── Code: fairness e robustezza per task lunghi ──────────────────────
+        # prefetch=1: con acks_late e task molto lunghi un worker non deve
+        # riservare un secondo messaggio che non può processare (i job in coda
+        # resterebbero "presi" ma fermi). Con concurrency=1 questo garantisce
+        # che ogni worker tenga in carico esattamente un job alla volta.
+        self.app.conf.worker_prefetch_multiplier = 1
+        # acks_late + reject_on_worker_lost espliciti a livello app (coerenti
+        # coi decoratori @app.task): se il worker muore il messaggio torna in
+        # coda invece di essere perso. L'idempotency_guard nei task evita la
+        # doppia esecuzione in caso di ri-consegna.
+        self.app.conf.task_acks_late = True
+        self.app.conf.task_reject_on_worker_lost = True
+        # I task non producono un "result" Celery utile (lo stato vive in
+        # item.diadema), quindi evitiamo scritture inutili sul result backend.
+        self.app.conf.task_ignore_result = True
+
     def task_imports(self):
         return ["girder_diadema_pipeline.tasks"]
 

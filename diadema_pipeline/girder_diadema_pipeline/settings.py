@@ -48,7 +48,7 @@ class PluginSettings:
 _DEFAULT_WIDGET_ENABLED = {
     "mriqc": True,
     "freesurfer": True,
-    "lstai": False,  # non ancora implementato
+    "lstai": True,  # task e widget risultati implementati
 }
 
 _DEFAULT_WIDGET_FIELDS_MRIQC = [

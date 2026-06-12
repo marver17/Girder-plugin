@@ -299,77 +299,100 @@ def _extractFileData(file):
 def _uploadHandler(event):
     """
     Event handler to automatically parse NIfTI files on upload.
+
+    Il parsing scarica l'intero file e invoca nibabel: operazioni pesanti che
+    bloccherebbero il thread di richiesta di CherryPy. Le eseguiamo quindi in un
+    thread daemon separato, lasciando ritornare subito l'handler. I modelli
+    Girder usano pymongo (thread-safe), quindi l'aggiornamento dell'item dal
+    thread è sicuro.
+    """
+    import logging
+    import threading
+
+    logger = logging.getLogger("girder.plugins.nifti_viewer")
+
+    file = event.info.get("file")
+    if not file:
+        return
+
+    name = file.get("name", "").lower()
+    if not (name.endswith(".nii") or name.endswith(".nii.gz")):
+        return
+
+    # Copia difensiva: l'event.info viene riusato dopo il ritorno dell'handler.
+    file_doc = dict(file)
+    thread = threading.Thread(
+        target=_parseUploadedNiftiAsync,
+        args=(file_doc,),
+        name=f"nifti-parse-{file_doc.get('_id')}",
+        daemon=True,
+    )
+    thread.start()
+    logger.info("NIfTI parse offloaded to background thread: %s", name)
+
+
+def _parseUploadedNiftiAsync(file):
+    """
+    Worker eseguito in un thread daemon: parsa il NIfTI e aggiorna l'item.
+    Tutte le eccezioni sono loggate e non propagate (il thread è fire-and-forget).
     """
     import logging
 
     logger = logging.getLogger("girder.plugins.nifti_viewer")
 
-    logger.info("=== NIfTI Upload Handler Called ===")
-    logger.info(f"Event info keys: {list(event.info.keys())}")
-
-    file = event.info.get("file")
-    if not file:
-        logger.warning("No file in event.info")
-        return
-
     name = file.get("name", "").lower()
-    logger.info(f"File name: {name}")
+    logger.info(f"=== NIfTI Upload Handler (async) === {name}")
 
-    # Check if it's a NIfTI file
-    if name.endswith(".nii") or name.endswith(".nii.gz"):
-        logger.info(f"Processing NIfTI file: {name}")
-        try:
-            # Parse the NIfTI file
-            logger.info("Parsing NIfTI file...")
-            fileMetadata = _parseNiftiFile(file)
-            if fileMetadata is None:
-                logger.warning("Failed to parse NIfTI file")
-                return
+    try:
+        # Parse the NIfTI file
+        logger.info("Parsing NIfTI file...")
+        fileMetadata = _parseNiftiFile(file)
+        if fileMetadata is None:
+            logger.warning("Failed to parse NIfTI file")
+            return
 
-            logger.info(f"Parsed metadata: {list(fileMetadata.keys())}")
+        logger.info(f"Parsed metadata: {list(fileMetadata.keys())}")
 
-            item = Item().load(file["itemId"], force=True)
-            if not item:
-                logger.warning("Failed to load item")
-                return
+        item = Item().load(file["itemId"], force=True)
+        if not item:
+            logger.warning("Failed to load item")
+            return
 
-            logger.info(f'Loaded item: {item["_id"]}')
+        logger.info(f'Loaded item: {item["_id"]}')
 
-            # Check for JSON sidecar
-            jsonMetadata = None
-            itemFiles = list(File().find({"itemId": item["_id"]}))
-            logger.info(f"Found {len(itemFiles)} files in item")
-            for itemFile in itemFiles:
-                if itemFile["name"].endswith(".json"):
-                    logger.info(f'Found JSON sidecar: {itemFile["name"]}')
-                    jsonMetadata = _parseJsonFile(itemFile)
-                    break
+        # Check for JSON sidecar
+        jsonMetadata = None
+        itemFiles = list(File().find({"itemId": item["_id"]}))
+        logger.info(f"Found {len(itemFiles)} files in item")
+        for itemFile in itemFiles:
+            if itemFile["name"].endswith(".json"):
+                logger.info(f'Found JSON sidecar: {itemFile["name"]}')
+                jsonMetadata = _parseJsonFile(itemFile)
+                break
 
-            # Update or create nifti metadata in item
-            if "nifti" in item:
-                logger.info("Updating existing nifti metadata")
-                # Update existing metadata
-                item["nifti"]["meta"].update(fileMetadata)
-                if jsonMetadata:
-                    item["nifti"]["meta"].update(jsonMetadata)
-            else:
-                logger.info("Creating new nifti metadata")
-                # Create new metadata
-                item["nifti"] = {"meta": fileMetadata, "files": []}
-                if jsonMetadata:
-                    item["nifti"]["meta"].update(jsonMetadata)
+        # Update or create nifti metadata in item
+        if "nifti" in item:
+            logger.info("Updating existing nifti metadata")
+            # Update existing metadata
+            item["nifti"]["meta"].update(fileMetadata)
+            if jsonMetadata:
+                item["nifti"]["meta"].update(jsonMetadata)
+        else:
+            logger.info("Creating new nifti metadata")
+            # Create new metadata
+            item["nifti"] = {"meta": fileMetadata, "files": []}
+            if jsonMetadata:
+                item["nifti"]["meta"].update(jsonMetadata)
 
-            # Add file info
-            fileInfo = _extractFileData(file)
-            item["nifti"]["files"].append(fileInfo)
+        # Add file info
+        fileInfo = _extractFileData(file)
+        item["nifti"]["files"].append(fileInfo)
 
-            logger.info("Saving item with nifti metadata")
-            Item().save(item)
-            logger.info("=== NIfTI Upload Handler Completed Successfully ===")
-        except Exception as e:
-            logger.error(f"Error auto-parsing NIfTI file: {str(e)}", exc_info=True)
-    else:
-        logger.info(f"Not a NIfTI file, skipping: {name}")
+        logger.info("Saving item with nifti metadata")
+        Item().save(item)
+        logger.info("=== NIfTI Upload Handler Completed Successfully ===")
+    except Exception as e:
+        logger.error(f"Error auto-parsing NIfTI file: {str(e)}", exc_info=True)
 
 
 def _buildSearchConditions(query):
@@ -385,7 +408,15 @@ def _buildSearchConditions(query):
     :param query: Stringa di ricerca dall'utente
     :returns: Lista di condizioni query MongoDB
     """
+    import re
+
     conditions = []
+
+    # La query utente finisce in operatori MongoDB $regex: va sempre escapata,
+    # altrimenti metacaratteri come '.*' o '(a' causano ReDoS o match arbitrari.
+    # re.escape mantiene la semantica di ricerca substring (la stringa letterale
+    # escapata matcha comunque come sottostringa case-insensitive).
+    safe_query = re.escape(query)
 
     # Campi stringa header NIfTI
     string_fields = [
@@ -398,7 +429,7 @@ def _buildSearchConditions(query):
     ]
 
     for field in string_fields:
-        conditions.append({field: {"$regex": query, "$options": "i"}})
+        conditions.append({field: {"$regex": safe_query, "$options": "i"}})
 
     # Gestione query numeriche per campi array (dimensioni, spacing)
     try:
@@ -442,10 +473,10 @@ def _buildSearchConditions(query):
     ]
 
     for field in bids_fields:
-        conditions.append({field: {"$regex": query, "$options": "i"}})
+        conditions.append({field: {"$regex": safe_query, "$options": "i"}})
 
     # Nomi file (files è un array di oggetti con campo 'name')
-    conditions.append({"nifti.files.name": {"$regex": query, "$options": "i"}})
+    conditions.append({"nifti.files.name": {"$regex": safe_query, "$options": "i"}})
 
     return conditions
 

@@ -28,6 +28,7 @@ from diadema.components.viewer import ViewerPanel
 from diadema.components.pipeline_panel import PipelinePanel
 from diadema.components.jobs_view import JobsView
 from diadema.components.results_panel import ResultsPanel
+from diadema.components.admin_view import AdminView
 
 
 class DiademaApp(TrameApp):
@@ -52,6 +53,7 @@ class DiademaApp(TrameApp):
         )
         self.jobs_view = JobsView(self.server, self.gc, self.pipeline_service)
         self.results_panel = ResultsPanel(self.server, self.gc)
+        self.admin_view = AdminView(self.server, self.gc, self.pipeline_service)
 
         # ── Initialize default state ──────────────────────────────────────
         self.state.update(
@@ -252,12 +254,13 @@ class DiademaApp(TrameApp):
                             ):
                                 self.jobs_view.build()
 
-                            # Admin view placeholder
-                            with v3.VContainer(
+                            # Admin view: plugin settings + Girder admin link
+                            with v3.VSheet(
                                 v_if=("active_view === 'admin'",),
-                                classes="fill-height d-flex align-center justify-center",
+                                classes="flex-grow-1 d-flex flex-column",
+                                style="overflow-y: auto;",
                             ):
-                                html.P("Admin settings — coming soon")
+                                self.admin_view.build()
 
                 # ── Global force re-run dialog (HTTP 409 conflicts) ───────
                 self.pipeline_panel.build_force_dialog()

@@ -166,6 +166,8 @@ services:
       GIRDER_API_URL: "http://girder:8080/api/v1"
       # Public URL exposed to the browser (via Nginx)
       GIRDER_PUBLIC_URL: "${DIADEMA_PUBLIC_URL:-http://localhost}"
+      # Girder native web UI (Nginx routes /girder → Girder); used by Admin page
+      GIRDER_ADMIN_URL: "${DIADEMA_PUBLIC_URL:-http://localhost}/girder"
       TRAME_HOST: "0.0.0.0"
       TRAME_PORT: "8888"
       DIADEMA_CACHE_DIR: "/tmp/diadema_cache"

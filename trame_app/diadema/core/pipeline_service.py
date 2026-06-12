@@ -112,3 +112,19 @@ class PipelineService:
         return await self._call(
             self._gc.aget(f"diadema_pipeline/session/{folder_id}/files")
         )
+
+    # ── Plugin settings (admin) ────────────────────────────────────────────
+
+    async def get_settings(self):
+        """GET /diadema_pipeline/settings → dict of all plugin settings."""
+        return await self._call(self._gc.aget("diadema_pipeline/settings"))
+
+    async def update_settings(self, settings: dict):
+        """PUT /diadema_pipeline/settings (admin only). Returns {'updated': ...}.
+
+        The endpoint's jsonParam('settings', paramType='body') consumes the whole
+        request body as the settings object, so pass it directly as json.
+        """
+        return await self._call(
+            self._gc.aput("diadema_pipeline/settings", json=settings)
+        )

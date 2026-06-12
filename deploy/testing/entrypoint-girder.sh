@@ -18,8 +18,6 @@ if pip install --help 2>/dev/null | grep -q -- "--no-use-pep517"; then
 fi
 
 install_plugins() {
-    echo "──── Rimozione plugin non desiderati ───────────────────────────"
-    pip uninstall --break-system-packages -q -y girder-nifti-qc 2>/dev/null || true
     echo "──── Installazione plugin Girder ────────────────────────────────"
     for plugin in \
         "$WORKSPACE/oauth2" \

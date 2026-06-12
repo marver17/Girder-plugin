@@ -175,24 +175,6 @@ services:
     user: girder
     restart: unless-stopped
 
-  # ── MRIQC worker – coda 'mriqc' (plugin nifti_qc) ─────────────────────────
-
-  mriqc-worker:
-    build:
-      context: ../../
-      dockerfile: mriqc-worker/Dockerfile
-    image: diadema-mriqc-worker:testing
-    container_name: diadema-test-mriqc-worker
-    networks: [diadema-test-net]
-    <<: *worker-deps
-    environment:
-      <<: *celery-env
-      C_FORCE_ROOT: "1"
-      GIRDER_API_URL: "http://girder:8080/api/v1"
-    volumes:
-      - ../../nifti_qc:/opt/nifti_qc
-    restart: unless-stopped
-
   # ── DIADEMA MRIQC worker – coda 'diadema_mriqc' ───────────────────────────
 
   diadema-mriqc-worker:

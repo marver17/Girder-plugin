@@ -24,12 +24,12 @@ Questo documento descrive come i componenti dello stack DIADEMA interagiscono tr
 ║  │            (diadema-test-girder :8080)                         │ ║
 ║  └────────────────────────────────────────────────────────────────┘ ║
 ║         │                  │               │              │         ║
-║  ┌──────▼──────┐   ┌────────▼───┐  ┌───────▼────┐ ┌──────▼───────┐ ║
-║  │celery-worker│   │mriqc-worker│  │diadema-    │ │freesurfer-   │ ║
-║  │             │   │            │  │mriqc-worker│ │worker        │ ║
-║  │ coda:celery │   │ coda:mriqc │  │coda:       │ │coda:         │ ║
-║  │             │   │            │  │diadema_mriqc│ │freesurfer    │ ║
-║  └─────────────┘   └────────────┘  └────────────┘ └──────────────┘ ║
+║  ┌──────▼──────┐  ┌─────────▼──┐  ┌────────▼───┐  ┌───────▼────┐   ║
+║  │celery-worker│  │diadema-    │  │freesurfer- │  │lstai-      │   ║
+║  │             │  │mriqc-worker│  │worker      │  │worker      │   ║
+║  │ coda:celery │  │coda:       │  │coda:       │  │coda:       │   ║
+║  │             │  │diadema_mriqc│ │freesurfer  │  │lstai       │   ║
+║  └─────────────┘  └────────────┘  └────────────┘  └────────────┘   ║
 ╚══════════════════════════════════════════════════════════════════════╝
 ```
 
@@ -51,9 +51,9 @@ Ogni tipo di analisi ha la **propria coda dedicata**, così i worker specializza
 ```
   RabbitMQ
   ├── coda: celery          → celery-worker        (job generici)
-  ├── coda: mriqc           → mriqc-worker         (NIfTI QC)
   ├── coda: diadema_mriqc   → diadema-mriqc-worker (DIADEMA MRIQC)
-  └── coda: freesurfer      → freesurfer-worker    (FreeSurfer)
+  ├── coda: freesurfer      → freesurfer-worker    (FreeSurfer)
+  └── coda: lstai           → lstai-worker         (LST-AI)
 ```
 
 ---
@@ -312,10 +312,6 @@ Questo design ha vantaggi importanti:
   │ celery-worker  │ celery       │ Job generici di Girder Worker    │
   │                │              │ (es. conversioni, operazioni su  │
   │                │              │  file non specializzate)         │
-  ├────────────────┼──────────────┼──────────────────────────────────┤
-  │ mriqc-worker   │ mriqc        │ Quality Control immagini NIfTI   │
-  │                │              │ (usa nipreps/mriqc installato    │
-  │                │              │  nell'immagine dedicata)         │
   ├────────────────┼──────────────┼──────────────────────────────────┤
   │diadema-mriqc   │ diadema_mriqc│ MRIQC pipeline DIADEMA           │
   │   -worker      │              │ (versione custom della pipeline) │

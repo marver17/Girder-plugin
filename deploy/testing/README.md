@@ -50,7 +50,7 @@ cp /path/to/license.txt deploy/testing/freesurfer_license.txt
 Se non hai la licenza e vuoi avviare lo stack senza FreeSurfer:
 
 ```bash
-docker compose up -d mongodb redis rabbitmq girder celery-worker mriqc-worker diadema-mriqc-worker
+docker compose up -d mongodb redis rabbitmq girder celery-worker diadema-mriqc-worker
 ```
 
 ### 3. Build frontend
@@ -78,7 +78,6 @@ docker compose up -d
 | `diadema-test-rabbitmq`             | Message broker Celery      | –               |
 | `diadema-test-girder`               | Girder HTTP server         | –               |
 | `diadema-test-celery-worker`        | Worker Girder generico     | `celery`        |
-| `diadema-test-mriqc-worker`         | Worker nifti_qc            | `mriqc`         |
 | `diadema-test-diadema-mriqc-worker` | Worker DIADEMA MRIQC       | `diadema_mriqc` |
 | `diadema-test-freesurfer-worker`    | Worker FreeSurfer          | `freesurfer`    |
 
@@ -208,7 +207,6 @@ i plugin da `/workspace/` (installazione normale, senza editable mode):
 ```
 oauth2
 nifti_viewer
-nifti_qc
 diadema_pipeline
 ```
 

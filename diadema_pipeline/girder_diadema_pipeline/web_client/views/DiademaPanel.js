@@ -657,7 +657,6 @@ const DiademaPanel = {
     },
 
     // ── Auto-detect parametri MRIQC dal filename / metadata ───────────────────
-    // Portato da nifti_qc/girder_nifti_qc/web_client/views/ItemView.js
 
     _inferMRIQCParams(itemModel) {
         const item = itemModel && typeof itemModel.toJSON === 'function' ? itemModel.toJSON() : {};

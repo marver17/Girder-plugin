@@ -27,8 +27,8 @@ case "${1:-all}" in
     ;;
   worker)
     echo "=== Avvio Celery worker ==="
-    # Ascolta solo la coda 'celery' (default).
-    # La coda 'mriqc' è riservata al container dedicato mriqc-worker (nipreps/mriqc).
+    # Ascolta solo la coda 'celery' (default). Le code dei tool DIADEMA
+    # (diadema_mriqc, freesurfer, lstai) sono servite dai container worker dedicati.
     # --heartbeat-interval=0: con --pool=solo il thread principale è bloccato durante
     # l'esecuzione dei task → nessun heartbeat AMQP → RabbitMQ chiude la connessione
     # dopo 60 s → ack fallisce → re-delivery. 0 disabilita l'heartbeat lato client.
@@ -40,7 +40,7 @@ case "${1:-all}" in
     GIRDER_PID=$!
 
     echo "=== Avvio Celery worker in background ==="
-    # Ascolta solo la coda 'celery'. La coda 'mriqc' è del container mriqc-worker.
+    # Ascolta solo la coda 'celery'. Le code dei tool DIADEMA sono dei worker dedicati.
     celery -A girder_worker.app worker -l info --pool=solo --queues=celery --heartbeat-interval=0 &
     WORKER_PID=$!
 

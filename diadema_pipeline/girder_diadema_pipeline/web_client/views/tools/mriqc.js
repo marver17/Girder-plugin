@@ -26,7 +26,7 @@ const MriqcTool = {
     icon: 'icon-chart-bar',
     description: 'MRIQC – Image Quality Metrics per RM strutturale e funzionale',
     resultField: 'diadema_mriqc',
-    workerNote: 'Richiede il container mriqc-worker (nipreps/mriqc)',
+    workerNote: 'Richiede il container diadema-mriqc-worker (nipreps/mriqc)',
 
     params: [
         {

@@ -11,7 +11,6 @@ WORKSPACE="$(cd "$(dirname "$0")" && pwd)"
 
 PLUGINS=(
     "nifti_viewer"
-    "nifti_qc"
     "diadema_pipeline"
 )
 

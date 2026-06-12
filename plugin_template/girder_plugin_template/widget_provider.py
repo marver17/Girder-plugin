@@ -37,7 +37,8 @@ class PluginTemplateWidgetProvider(WidgetProviderBase):
     def get_priority(cls) -> int:
         """
         Ordine di visualizzazione nel viewer (numeri bassi = prima).
-        nifti_qc usa 10; usa un valore più alto per apparire dopo.
+        Il widget risultati DIADEMA usa priorità bassa; usa un valore più alto
+        per apparire dopo.
         """
         return 20
 

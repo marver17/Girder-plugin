@@ -301,6 +301,11 @@ Questo design ha vantaggi importanti:
 - il token temporaneo ha **permessi limitati** al job specifico
 - il worker può girare su una **macchina diversa** da Girder (scale-out)
 
+> Nel deploy completo (`deploy/full`) questa comunicazione worker↔Girder
+> **non avviene più in chiaro**: i worker chiamano `https://nginx/api/v1`,
+> con verifica del certificato contro una CA interna. Vedi la
+> [sezione 12 – Sicurezza della comunicazione (TLS/HTTPS)](#12-sicurezza-della-comunicazione-tlshttps).
+
 ---
 
 ## 9. Worker specializzati vs. worker generico
@@ -349,7 +354,9 @@ I worker specializzati (mriqc, freesurfer) usano **immagini Docker dedicate** pe
 
 ## 11. Porte esposte sull'host
 
-Solo due porte sono visibili dall'esterno del Docker network:
+Le porte visibili dall'esterno dipendono dallo stack.
+
+**Stack dev (`docker-compose.yml` di root)** – HTTP, comodo per lo sviluppo:
 
 ```
   HOST
@@ -357,5 +364,92 @@ Solo due porte sono visibili dall'esterno del Docker network:
   └── :15672 →  RabbitMQ Management UI (diagnostica)
 
   Tutto il resto (MongoDB :27017, Redis :6379, code interne)
-  è accessibile SOLO tra i container sulla rete diadema-test-network.
+  è accessibile SOLO tra i container sulla rete interna.
 ```
+
+**Stack completo (`deploy/full`)** – l'unico entry point pubblico è nginx, in HTTPS:
+
+```
+  HOST
+  ├── :80    →  nginx  → redirect 301 verso :443
+  ├── :443   →  nginx  → TLS terminato qui, proxy interno verso girder:8080
+  ├── :8081  →  Girder diretto (solo admin/debug, dietro al proxy)
+  └── :15672 →  RabbitMQ Management UI (diagnostica)
+```
+
+Vedi la [sezione 12 – Sicurezza della comunicazione (TLS/HTTPS)](#12-sicurezza-della-comunicazione-tlshttps)
+per i dettagli sul TLS.
+
+---
+
+## 12. Sicurezza della comunicazione (TLS/HTTPS)
+
+Nello **stack completo (`deploy/full`)** tutto il traffico applicativo è cifrato: sia
+quello del browser verso l'interfaccia, sia — punto cruciale — quello dei **job**
+(worker → Girder). La terminazione TLS avviene su **nginx**; dietro al proxy, sulla rete
+Docker interna isolata, il traffico resta in HTTP verso `girder:8080`.
+
+```
+  browser ──HTTPS──▶ nginx:443 ──HTTP (rete interna)──▶ girder:8080
+  worker  ──HTTPS──▶ nginx:443 ──HTTP (rete interna)──▶ girder:8080
+                       ▲
+                       └─ certificato server, SAN: nginx, localhost,
+                          ${DIADEMA_PUBLIC_HOST}, 127.0.0.1
+```
+
+### CA interna e generazione dei certificati (`init-certs`)
+
+Un servizio di init dedicato, **`init-certs`**, genera al primo avvio una **CA interna
+self-signed** e un certificato server, salvati in un volume condiviso (`certs`):
+
+```
+  [1] MongoDB, Redis, RabbitMQ  (healthy)
+  [2] init-permissions          (volume assetstore scrivibile)
+  [2] init-certs                (genera ca.crt/ca.key + server.crt/server.key)
+        │  - idempotente: se server.crt esiste già, non rigenera nulla
+        │  - SAN: DNS:nginx, DNS:localhost, DNS:${DIADEMA_PUBLIC_HOST}, IP:127.0.0.1
+        ▼
+  [3] Girder Server  →  [4] nginx + worker  (montano il volume `certs` in sola lettura)
+```
+
+La CA non viene mai versionata: vive solo nel volume Docker. Il browser mostrerà un
+avviso sul certificato self-signed finché non si importa `ca.crt` nel proprio trust store
+(estraibile con `docker compose cp nginx:/etc/nginx/certs/ca.crt ./ca.crt`).
+
+### Verifica del certificato nei job
+
+I worker chiamano Girder su `https://nginx/api/v1` (variabili `GIRDER_API_URL` e
+`GIRDER_WORKER_CALLBACK_URL`). La verifica del certificato **non è disabilitata**: ogni
+container client (girder + worker) monta la CA e la indica via la variabile standard
+**`REQUESTS_CA_BUNDLE=/etc/nginx/certs/ca.crt`**, così `GirderClient`/`requests`
+validano la catena contro la CA interna. Un certificato non valido fa fallire la chiamata.
+
+```
+  worker
+    │  GirderClient(apiUrl="https://nginx/api/v1")
+    │  requests verifica il cert con REQUESTS_CA_BUNDLE → ca.crt
+    ▼
+  nginx (TLS) ──▶ girder:8080
+```
+
+### Redirect HTTP→HTTPS
+
+nginx accetta la porta 80 solo per reindirizzare (`301`) verso `https://`. Nessun
+contenuto applicativo viaggia in chiaro. L'header `X-Forwarded-Proto: https` viene
+propagato a Girder così che gli URL pubblici generati siano coerenti.
+
+### Loopback interno del server
+
+Alcune route REST del plugin istanziano un `GirderClient` che richiama la **stessa** istanza
+Girder durante una request del browser. Con `X-Forwarded-Proto: https` l'URL ricavato dalla
+request diventerebbe l'indirizzo pubblico HTTPS, facendo uscire inutilmente la chiamata in
+rete (hairpin verso nginx). Per questo tali chiamate usano un **loopback interno** in HTTP
+(`_internal_api_url()` → `http://localhost:8080/api/v1`) che non lascia mai il container.
+
+### Limiti attuali (fuori scope)
+
+- Lo **stack dev** di root resta in HTTP puro (comodità di sviluppo).
+- Il broker **RabbitMQ** (AMQP), **MongoDB** e **Redis** comunicano in chiaro ma **solo**
+  sulla rete Docker interna, non esposti all'host.
+- Non è previsto un certificato pubblico (es. Let's Encrypt): la fiducia si basa sulla CA
+  interna, adatta alla comunicazione tra container.

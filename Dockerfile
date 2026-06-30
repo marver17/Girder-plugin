@@ -78,6 +78,12 @@ RUN pip install --no-cache-dir /plugins/diadema_pipeline
 # Trim npm cache to reduce image size
 RUN npm cache clean --force
 
+# I plugin sopra sono installati come root: le rispettive dist-info nel venv
+# risultano root-owned. A runtime l'entrypoint reinstalla i plugin da /workspace
+# come utente `girder` (live-edit) e non potrebbe sovrascriverle. Riallinea la
+# proprietà del venv (e dei sorgenti baked) a `girder` DOPO le installazioni.
+RUN chown -R girder:girder /opt/venv /plugins
+
 EXPOSE 8080
 
 USER girder

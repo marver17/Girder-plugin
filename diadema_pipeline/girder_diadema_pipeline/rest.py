@@ -9,7 +9,6 @@ import os
 import re
 import shlex
 
-import cherrypy
 from girder.api import access
 from girder.api.describe import Description, autoDescribeRoute
 from girder.api.rest import Resource, filtermodel, getApiUrl, getCurrentToken
@@ -150,6 +149,19 @@ def _worker_callback_url() -> str:
     if "localhost" in url or "127.0.0.1" in url:
         url = url.replace("127.0.0.1", "girder").replace("localhost", "girder")
     return url
+
+
+def _internal_api_url() -> str:
+    """URL per le chiamate sincrone del server verso sé stesso.
+
+    Questi endpoint istanziano un GirderClient che richiama la stessa istanza
+    Girder durante la gestione di una request del browser. Usare
+    cherrypy.request.base farebbe ereditare lo schema/host pubblico (https://…
+    via X-Forwarded-Proto dietro nginx), facendo uscire inutilmente la chiamata
+    in rete (hairpin verso il proxy, host magari non risolvibile dal container).
+    Restiamo invece su un loopback interno HTTP che non lascia il container.
+    """
+    return os.environ.get("GIRDER_INTERNAL_API_URL", "http://localhost:8080/api/v1")
 
 
 class DiademaResource(Resource):
@@ -602,7 +614,7 @@ class DiademaResource(Resource):
         from .tasks._helpers import bids_resolve_participant_label
 
         token = getCurrentToken()
-        gc = GirderClient(apiUrl=cherrypy.request.base + "/api/v1")
+        gc = GirderClient(apiUrl=_internal_api_url())
         gc.token = str(token["_id"])
 
         item_id = str(item["_id"])
@@ -1336,7 +1348,7 @@ class DiademaResource(Resource):
         from .tasks._helpers import bids_resolve_participant_label_from_folder, bids_resolve_session_label
 
         token = getCurrentToken()
-        gc = GirderClient(apiUrl=cherrypy.request.base + "/api/v1")
+        gc = GirderClient(apiUrl=_internal_api_url())
         gc.token = str(token["_id"])
 
         folder_id = str(folder["_id"])
@@ -1360,7 +1372,6 @@ class DiademaResource(Resource):
         )
     )
     def getSessionFiles(self, folder, params):
-        import cherrypy
         from girder_client import GirderClient
 
         from .tasks._helpers import (
@@ -1372,7 +1383,7 @@ class DiademaResource(Resource):
         )
 
         token = getCurrentToken()
-        gc = GirderClient(apiUrl=cherrypy.request.base + "/api/v1")
+        gc = GirderClient(apiUrl=_internal_api_url())
         gc.token = str(token["_id"])
 
         folder_id = str(folder["_id"])

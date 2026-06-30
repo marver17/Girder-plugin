@@ -20,8 +20,13 @@ x-girder-env: &girder-env
   GIRDER_REDIS_URL: "redis://redis:6379"
   GIRDER_NOTIFICATION_REDIS_URL: "redis://redis:6379"
   BROKER_URL: "amqp://${RABBITMQ_USER}:${RABBITMQ_PASS}@rabbitmq:5672//"
-  GIRDER_WORKER_CALLBACK_URL: "http://girder:8080/api/v1"
-  GIRDER_API_URL: "http://girder:8080/api/v1"
+  # I job (server → worker → Girder) viaggiano su HTTPS terminato da nginx.
+  # nginx inoltra a girder:8080 in rete interna. Il cert è self-signed: la CA
+  # interna è montata nei container e indicata da REQUESTS_CA_BUNDLE così che
+  # GirderClient/requests verifichino il certificato senza disabilitare la verifica.
+  GIRDER_WORKER_CALLBACK_URL: "https://nginx/api/v1"
+  GIRDER_API_URL: "https://nginx/api/v1"
+  REQUESTS_CA_BUNDLE: /etc/nginx/certs/ca.crt
 
 x-worker-deps: &worker-deps
   depends_on:
@@ -31,6 +36,8 @@ x-worker-deps: &worker-deps
       condition: service_healthy
     girder:
       condition: service_healthy
+    init-certs:
+      condition: service_completed_successfully
 
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -100,6 +107,50 @@ services:
       - girder_assetstore:/data/assetstore
     restart: "no"
 
+  # ── Generazione certificati TLS (CA interna self-signed) ────────────────────
+  # Genera una CA interna + certificato server nel volume `certs`, condiviso con
+  # nginx (terminazione TLS) e con i container client (girder + worker) che
+  # verificano il certificato via REQUESTS_CA_BUNDLE. Idempotente: se il cert
+  # esiste già non rigenera nulla, così la CA resta stabile tra i riavvii.
+  init-certs:
+    image: alpine:3
+    container_name: diadema-full-init-certs
+    networks: [diadema-full-net]
+    user: root
+    environment:
+      DIADEMA_PUBLIC_HOST: ${DIADEMA_PUBLIC_HOST:-localhost}
+    command:
+      - sh
+      - -c
+      - |
+        set -e
+        if [ -f /certs/server.crt ]; then
+          echo "Certificati già presenti in /certs, skip generazione"
+          exit 0
+        fi
+        apk add --no-cache openssl >/dev/null
+        cd /certs
+        echo "Genero CA interna DIADEMA..."
+        openssl req -x509 -newkey rsa:4096 -nodes -keyout ca.key -out ca.crt \
+          -days 3650 -subj "/O=DIADEMA/CN=DIADEMA Internal CA"
+        # $$ lascia la variabile alla shell del container (espansa da `environment`,
+        # con default localhost). Con $ singolo la sostituirebbe docker compose,
+        # producendo un SAN vuoto se la var non è nel .env.
+        echo "Genero certificato server (SAN: nginx, localhost, $$DIADEMA_PUBLIC_HOST, 127.0.0.1)..."
+        openssl req -newkey rsa:4096 -nodes -keyout server.key -out server.csr \
+          -subj "/O=DIADEMA/CN=$$DIADEMA_PUBLIC_HOST"
+        cat > san.cnf <<EOF
+        subjectAltName=DNS:nginx,DNS:localhost,DNS:$$DIADEMA_PUBLIC_HOST,IP:127.0.0.1
+        EOF
+        openssl x509 -req -in server.csr -CA ca.crt -CAkey ca.key -CAcreateserial \
+          -out server.crt -days 825 -extfile san.cnf
+        rm -f server.csr san.cnf
+        chmod 640 server.key ca.key
+        echo "Certificati generati in /certs"
+    volumes:
+      - certs:/certs
+    restart: "no"
+
   # ── Girder server ───────────────────────────────────────────────────────────
 
   girder:
@@ -117,6 +168,8 @@ services:
       rabbitmq:
         condition: service_healthy
       init-permissions:
+        condition: service_completed_successfully
+      init-certs:
         condition: service_completed_successfully
     environment:
       <<: *girder-env
@@ -136,6 +189,7 @@ services:
       - ../../:/workspace
       - girder_data:/home/girder/.local
       - girder_assetstore:${GIRDER_ASSETSTORE_PATH:-/data/assetstore}
+      - certs:/etc/nginx/certs:ro   # ca.crt per REQUESTS_CA_BUNDLE
     ports:
       - "8081:8080"   # Girder UI diretta (admin/debug)
     entrypoint: ["/sbin/tini", "--"]
@@ -158,10 +212,14 @@ services:
     depends_on:
       girder:
         condition: service_healthy
+      init-certs:
+        condition: service_completed_successfully
     ports:
-      - "${NGINX_PORT:-80}:80"
+      - "${NGINX_PORT:-80}:80"            # redirect 80 → 443
+      - "${NGINX_HTTPS_PORT:-443}:443"    # entry point HTTPS
     volumes:
       - ./nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
+      - certs:/etc/nginx/certs:ro
     restart: unless-stopped
 
   # ── Celery worker ───────────────────────────────────────────────────────────
@@ -176,6 +234,7 @@ services:
     volumes:
       - ../../:/workspace
       - girder_data:/home/girder/.local
+      - certs:/etc/nginx/certs:ro
     entrypoint: ["/sbin/tini", "--"]
     command: ["bash", "/workspace/deploy/testing/entrypoint-girder.sh", "worker"]
     user: girder
@@ -194,11 +253,13 @@ services:
     environment:
       <<: *celery-env
       C_FORCE_ROOT: "1"
-      GIRDER_API_URL: "http://girder:8080/api/v1"
+      GIRDER_API_URL: "https://nginx/api/v1"
+      REQUESTS_CA_BUNDLE: /etc/nginx/certs/ca.crt
       DIADEMA_MRIQC_OUTPUT_DIR: /data/diadema/mriqc
     volumes:
       # Il plugin è baked nell'immagine (install non-editable al build)
       - diadema_mriqc_data:/data/diadema/mriqc
+      - certs:/etc/nginx/certs:ro
     restart: unless-stopped
 
   # ── FreeSurfer worker ───────────────────────────────────────────────────────
@@ -214,13 +275,15 @@ services:
     environment:
       <<: *celery-env
       C_FORCE_ROOT: "1"
-      GIRDER_API_URL: "http://girder:8080/api/v1"
+      GIRDER_API_URL: "https://nginx/api/v1"
+      REQUESTS_CA_BUNDLE: /etc/nginx/certs/ca.crt
       FS_LICENSE: /usr/local/freesurfer/license.txt
       DIADEMA_SUBJECTS_DIR: /data/diadema/subjects
     volumes:
       # Il plugin è baked nell'immagine (install non-editable al build)
       - diadema_subjects_data:/data/diadema/subjects
       - ${FREESURFER_LICENSE_PATH:-./freesurfer_license.txt}:/usr/local/freesurfer/license.txt:ro
+      - certs:/etc/nginx/certs:ro
     restart: unless-stopped
 
   # ── LST-AI worker ───────────────────────────────────────────────────────────
@@ -236,11 +299,13 @@ services:
     environment:
       <<: *celery-env
       C_FORCE_ROOT: "1"
-      GIRDER_API_URL: "http://girder:8080/api/v1"
+      GIRDER_API_URL: "https://nginx/api/v1"
+      REQUESTS_CA_BUNDLE: /etc/nginx/certs/ca.crt
       DIADEMA_LSTAI_OUTPUT_DIR: /data/diadema/lstai
     volumes:
       # Il plugin è baked nell'immagine (install non-editable al build)
       - diadema_lstai_data:/data/diadema/lstai
+      - certs:/etc/nginx/certs:ro
     restart: unless-stopped
     # Decommentare su host con GPU NVIDIA (richiesto se si lancia con useGpu=true):
     # deploy:
@@ -267,6 +332,8 @@ volumes:
     name: diadema-full-girder-data
   girder_assetstore:
     name: diadema-full-girder-assetstore
+  certs:
+    name: diadema-full-certs
   diadema_mriqc_data:
     name: diadema-full-mriqc-output
   diadema_subjects_data:

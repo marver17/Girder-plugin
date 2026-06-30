@@ -1,94 +1,94 @@
-# DIADEMA – Architettura del sistema
+# DIADEMA – System architecture
 
-Questo documento descrive come i componenti dello stack DIADEMA interagiscono tra loro, dal boot dei container fino all'esecuzione di un job di analisi.
+This document describes how the components of the DIADEMA stack interact with one another, from container boot up to the execution of an analysis job.
 
 ---
 
-## 1. Panoramica dei componenti
+## 1. Component overview
 
 ```
 ╔══════════════════════════════════════════════════════════════════════╗
 ║                         HOST (docker network)                        ║
 ║                                                                      ║
-║  ┌──────────────┐   ┌──────────────┐   ┌──────────────────────────┐ ║
-║  │   MongoDB    │   │    Redis     │   │        RabbitMQ          │ ║
-║  │              │   │              │   │                          │ ║
-║  │  Persistenza │   │ Notifiche    │   │  Message broker Celery   │ ║
-║  │  dati Girder │   │ real-time    │   │  (code dei job)          │ ║
-║  └──────┬───────┘   └──────┬───────┘   └────────────┬─────────────┘ ║
-║         │                  │                        │               ║
-║         └──────────────────┼────────────────────────┘               ║
-║                            │                                        ║
-║  ┌─────────────────────────▼──────────────────────────────────────┐ ║
-║  │                    Girder Server                               │ ║
-║  │            (diadema-test-girder :8080)                         │ ║
-║  └────────────────────────────────────────────────────────────────┘ ║
-║         │                  │               │              │         ║
-║  ┌──────▼──────┐  ┌─────────▼──┐  ┌────────▼───┐  ┌───────▼────┐   ║
-║  │celery-worker│  │diadema-    │  │freesurfer- │  │lstai-      │   ║
-║  │             │  │mriqc-worker│  │worker      │  │worker      │   ║
-║  │ coda:celery │  │coda:       │  │coda:       │  │coda:       │   ║
-║  │             │  │diadema_mriqc│ │freesurfer  │  │lstai       │   ║
-║  └─────────────┘  └────────────┘  └────────────┘  └────────────┘   ║
+║  ┌──────────────┐   ┌──────────────┐   ┌──────────────────────────┐  ║
+║  │   MongoDB    │   │    Redis     │   │        RabbitMQ          │  ║
+║  │              │   │              │   │                          │  ║
+║  │  Girder data │   │ Real-time    │   │  Celery message broker   │  ║
+║  │  persistence │   │ notifications│   │  (job queues)            │  ║
+║  └──────┬───────┘   └──────┬───────┘   └────────────┬─────────────┘  ║
+║         │                  │                        │                ║
+║         └──────────────────┼────────────────────────┘                ║
+║                            │                                         ║
+║  ┌─────────────────────────▼──────────────────────────────────────┐  ║
+║  │                    Girder Server                               │  ║
+║  │            (diadema-test-girder :8080)                         │  ║
+║  └────────────────────────────────────────────────────────────────┘  ║
+║         │                │               │               │           ║
+║  ┌──────▼──────┐  ┌──────▼──────┐  ┌─────▼──────┐  ┌─────▼──────┐    ║
+║  │celery-worker│  │diadema-     │  │freesurfer- │  │lstai-      │    ║
+║  │             │  │mriqc-worker │  │worker      │  │worker      │    ║
+║  │ queue:celery│  │queue:       │  │queue:      │  │queue:      │    ║
+║  │             │  │diadema_mriqc│  │freesurfer  │  │lstai       │    ║
+║  └─────────────┘  └─────────────┘  └────────────┘  └────────────┘    ║
 ╚══════════════════════════════════════════════════════════════════════╝
 ```
 
 ---
 
-## 2. Infrastruttura di supporto
+## 2. Supporting infrastructure
 
 ### MongoDB
-Il database principale dove Girder salva tutto: utenti, cartelle, file (metadati), job, impostazioni dei plugin, risultati delle analisi. I file binari (immagini NIfTI, output) **non** sono nel database ma nell'assetstore.
+The main database where Girder stores everything: users, folders, files (metadata), jobs, plugin settings, analysis results. Binary files (NIfTI images, output) are **not** in the database but in the assetstore.
 
 ### Redis
-Usato esclusivamente da Girder per le **notifiche real-time** verso il browser. Quando un job cambia stato (in esecuzione, completato, errore), Girder pubblica l'evento su Redis e il browser lo riceve via Server-Sent Events senza dover fare polling.
+Used exclusively by Girder for **real-time notifications** to the browser. When a job changes state (running, completed, error), Girder publishes the event on Redis and the browser receives it via Server-Sent Events without having to poll.
 
 ### RabbitMQ
-Il **bus dei messaggi** tra Girder e i worker Celery. Girder non esegue mai direttamente l'elaborazione pesante: scrive un messaggio su una coda RabbitMQ e torna subito. Il worker legge il messaggio e inizia il lavoro. Questo disaccoppia completamente il server HTTP dall'elaborazione.
+The **message bus** between Girder and the Celery workers. Girder never performs the heavy processing directly: it writes a message to a RabbitMQ queue and returns immediately. The worker reads the message and starts the work. This fully decouples the HTTP server from the processing.
 
-Ogni tipo di analisi ha la **propria coda dedicata**, così i worker specializzati ricevono solo i job di competenza:
+Each type of analysis has its **own dedicated queue**, so the specialized workers only receive the jobs they are responsible for:
 
 ```
   RabbitMQ
-  ├── coda: celery          → celery-worker        (job generici)
-  ├── coda: diadema_mriqc   → diadema-mriqc-worker (DIADEMA MRIQC)
-  ├── coda: freesurfer      → freesurfer-worker    (FreeSurfer)
-  └── coda: lstai           → lstai-worker         (LST-AI)
+  ├── queue: celery         → celery-worker        (generic jobs)
+  ├── queue: diadema_mriqc  → diadema-mriqc-worker (DIADEMA MRIQC)
+  ├── queue: freesurfer     → freesurfer-worker    (FreeSurfer)
+  └── queue: lstai          → lstai-worker         (LST-AI)
 ```
 
 ---
 
-## 3. Sequenza di avvio
+## 3. Startup sequence
 
-All'avvio dello stack, i container si avviano in ordine garantito dalle dipendenze:
+When the stack starts, the containers come up in an order guaranteed by their dependencies:
 
 ```
   [1] MongoDB, Redis, RabbitMQ
-        │  (healthcheck: pronti ad accettare connessioni)
+        │  (healthcheck: ready to accept connections)
         ▼
   [2] init-permissions
-        │  (garantisce che il volume dell'assetstore sia
-        │   scrivibile dall'utente girder prima che il server parta)
+        │  (ensures the assetstore volume is writable by the
+        │   girder user before the server starts)
         ▼
   [3] Girder Server
-        │  ┌─ installa i plugin (oauth2, nifti_viewer, diadema_pipeline)
-        │  ├─ esegue bootstrap_girder.py
-        │  │     ├── crea assetstore se non esiste
-        │  │     ├── applica impostazioni (brand, policy registrazione, ...)
-        │  │     └── crea utente admin se non esiste
-        │  └─ avvia uvicorn girder.asgi:app (ASGI)
-        │  (healthcheck: risponde su /api/v1/system/version)
+        │  ┌─ installs the plugins (oauth2, nifti_viewer, diadema_pipeline)
+        │  ├─ runs bootstrap_girder.py
+        │  │     ├── creates the assetstore if it does not exist
+        │  │     ├── applies settings (brand, registration policy, ...)
+        │  │     └── creates the admin user if it does not exist
+        │  └─ starts uvicorn girder.asgi:app (ASGI)
+        │  (healthcheck: responds on /api/v1/system/version)
         ▼
-  [4] Tutti i worker
-        │  (aspettano che Girder sia healthy prima di connettersi)
-        └─ si connettono a RabbitMQ e restano in ascolto
+  [4] All workers
+        │  (wait for Girder to be healthy before connecting)
+        └─ connect to RabbitMQ and stay listening
 ```
 
 ---
 
-## 4. Il ruolo di Girder Server
+## 4. The role of the Girder Server
 
-Girder è il cuore del sistema. Si occupa di:
+Girder is the heart of the system. It is responsible for:
 
 ```
   Browser / Client
@@ -101,113 +101,113 @@ Girder è il cuore del sistema. Si occupa di:
   │  ┌────────────┐    ┌─────────────────────┐   │
   │  │    Auth    │    │    File Storage     │   │
   │  │            │    │                     │   │
-  │  │ - login    │    │ - upload file NIfTI │   │
+  │  │ - login    │    │ - upload NIfTI file │   │
   │  │ - token    │    │ - download file     │   │
-  │  │ - permessi │    │ - assetstore su     │   │
+  │  │ - perms    │    │ - assetstore on     │   │
   │  └────────────┘    │   filesystem        │   │
   │                    └─────────────────────┘   │
   │  ┌──────────────────────────────────────┐    │
   │  │           Job tracking               │    │
   │  │                                      │    │
-  │  │ - crea job con stato QUEUED          │    │
-  │  │ - pubblica task su RabbitMQ          │    │
-  │  │ - aggiorna stato (RUNNING/SUCCESS/   │    │
-  │  │   ERROR) quando il worker risponde   │    │
+  │  │ - creates job with state QUEUED      │    │
+  │  │ - publishes task on RabbitMQ         │    │
+  │  │ - updates state (RUNNING/SUCCESS/    │    │
+  │  │   ERROR) when the worker responds    │    │
   │  └──────────────────────────────────────┘    │
   │  ┌──────────────────────────────────────┐    │
-  │  │              Plugin                  │    │
+  │  │              Plugins                 │    │
   │  │                                      │    │
-  │  │ - aggiungono route REST              │    │
-  │  │ - definiscono i task Celery          │    │
-  │  │ - estendono l'interfaccia web        │    │
+  │  │ - add their own REST routes          │    │
+  │  │ - define the Celery tasks            │    │
+  │  │ - extend the web interface           │    │
   │  └──────────────────────────────────────┘    │
   └──────────────────────────────────────────────┘
 ```
 
-### L'assetstore
-I file binari (immagini NIfTI, PDF di report, output delle analisi) non vengono salvati in MongoDB ma in una directory del filesystem chiamata **assetstore**. In MongoDB rimangono solo i metadati (nome, dimensione, checksum, percorso). Questo permette a Girder di gestire file anche molto grandi senza appesantire il database.
+### The assetstore
+Binary files (NIfTI images, report PDFs, analysis output) are not stored in MongoDB but in a filesystem directory called the **assetstore**. Only the metadata (name, size, checksum, path) remain in MongoDB. This lets Girder handle even very large files without burdening the database.
 
 ```
-  Upload di un file NIfTI
+  Upload of a NIfTI file
   ┌──────────┐           ┌──────────────┐         ┌────────────────┐
   │  Client  │──────────►│    Girder    │────────►│   Assetstore   │
-  │          │  HTTP PUT │              │  scrivi  │  (filesystem   │
-  │          │           │  - valida    │  binario │   /data/       │
-  │          │           │  - genera ID │         │   assetstore/) │
-  │          │           │  - salva     │         └────────────────┘
-  │          │◄──────────│    metadati  │
-  │          │  file ID  │  su MongoDB  │────────►┌────────────────┐
-  └──────────┘           └──────────────┘  salva  │    MongoDB     │
-                                           metad. │  { _id, name,  │
+  │          │  HTTP PUT │              │  write  │  (filesystem   │
+  │          │           │  - validate  │  binary │   /data/       │
+  │          │           │  - generate  │         │   assetstore/) │
+  │          │           │    an ID     │         └────────────────┘
+  │          │◄──────────│  - save      │
+  │          │  file ID  │    metadata  │────────►┌────────────────┐
+  └──────────┘           │  on MongoDB  │  save   │    MongoDB     │
+                         └──────────────┘  metad. │  { _id, name,  │
                                                   │    size, path }│
                                                   └────────────────┘
 ```
 
 ---
 
-## 5. Plugin: come estendono Girder
+## 5. Plugins: how they extend Girder
 
-I plugin sono **pacchetti Python** installati nello stesso processo di Girder. Alla partenza Girder li carica automaticamente e ciascuno può:
+The plugins are **Python packages** installed in the same process as Girder. At startup Girder loads them automatically and each one can:
 
-- aggiungere **endpoint REST** propri (es. `/api/v1/diadema/launch`)
-- definire **task Celery** che verranno eseguiti dai worker
-- aggiungere **widget** all'interfaccia web
+- add its own **REST endpoints** (e.g. `/api/v1/diadema/launch`)
+- define **Celery tasks** that will be executed by the workers
+- add **widgets** to the web interface
 
 ```
-  Plugin installati nel container girder:
+  Plugins installed in the girder container:
 
   girder_oauth2
-  └── aggiunge login via provider OAuth2 esterno
+  └── adds login via an external OAuth2 provider
 
   girder_nifti_viewer
-  └── aggiunge widget UI per la visualizzazione 3D di file NIfTI
+  └── adds a UI widget for 3D visualization of NIfTI files
 
   girder_diadema_pipeline
-  ├── aggiunge endpoint REST per lanciare le pipeline
-  ├── definisce il task "diadema_mriqc" → coda diadema_mriqc
-  └── definisce il task "freesurfer"    → coda freesurfer
+  ├── adds REST endpoints to launch the pipelines
+  ├── defines the "diadema_mriqc" task → diadema_mriqc queue
+  └── defines the "freesurfer" task    → freesurfer queue
 ```
 
 ---
 
-## 6. I worker Celery
+## 6. The Celery workers
 
-Ogni worker è un processo Python che rimane **in ascolto passiva** su RabbitMQ. Non espone porte HTTP. Non ha accesso diretto a MongoDB.
+Each worker is a Python process that stays **passively listening** on RabbitMQ. It exposes no HTTP ports. It has no direct access to MongoDB.
 
 ```
-  Worker (stato idle)
+  Worker (idle state)
 
   ┌─────────────────────────────────────┐
   │          celery-worker              │
   │                                     │
-  │   Plugin installati:                │
-  │   (stessi del Girder Server,        │
-  │    necessari per importare          │
-  │    le funzioni dei task)            │
+  │   Installed plugins:                │
+  │   (same as the Girder Server,       │
+  │    needed in order to import        │
+  │    the task functions)              │
   │                                     │
   │   ┌─────────────────────────────┐   │
   │   │   Celery process            │   │
-  │   │   in ascolto su:            │   │
+  │   │   listening on:             │   │
   │   │   amqp://rabbitmq:5672      │   │
-  │   │   coda: celery              │   │
+  │   │   queue: celery             │   │
   │   │                             │   │
-  │   │   [nessun messaggio] → wait │   │
+  │   │   [no message] → wait       │   │
   │   └─────────────────────────────┘   │
   └─────────────────────────────────────┘
 ```
 
-### Perché i plugin devono essere installati anche nei worker?
+### Why must the plugins be installed in the workers too?
 
-I task Celery sono **funzioni Python** definite dentro i plugin. Quando il worker riceve un messaggio dalla coda, deve poter **importare** quella funzione per eseguirla. Se il plugin non fosse installato nel worker, l'importazione fallirebbe.
+The Celery tasks are **Python functions** defined inside the plugins. When the worker receives a message from the queue, it must be able to **import** that function in order to execute it. If the plugin were not installed in the worker, the import would fail.
 
 ---
 
-## 7. Ciclo di vita di un job
+## 7. Lifecycle of a job
 
-Sequenza completa dalla richiesta dell'utente al completamento:
+Full sequence from the user's request to completion:
 
 ```
-  FASE 1 – Richiesta
+  PHASE 1 – Request
   ════════════════════════════════════════════════════
   Browser
     │
@@ -216,53 +216,53 @@ Sequenza completa dalla richiesta dell'utente al completamento:
     │  Authorization: Bearer <token>
     ▼
   Girder Server
-    │  - verifica token e permessi
-    │  - crea Job su MongoDB  → stato: QUEUED
-    │  - genera token temporaneo per il worker
-    │  - pubblica messaggio su RabbitMQ (coda: diadema_mriqc)
+    │  - verifies token and permissions
+    │  - creates a Job on MongoDB  → state: QUEUED
+    │  - generates a temporary token for the worker
+    │  - publishes a message on RabbitMQ (queue: diadema_mriqc)
     │    { job_id, file_id, girder_token, girder_api_url }
     ▼
-  Risposta al browser: { job_id, status: "queued" }
+  Response to the browser: { job_id, status: "queued" }
 
 
-  FASE 2 – Esecuzione
+  PHASE 2 – Execution
   ════════════════════════════════════════════════════
   diadema-mriqc-worker
-    │  (riceve il messaggio da RabbitMQ)
+    │  (receives the message from RabbitMQ)
     │
-    ├─ notifica Girder: stato → RUNNING
-    │     Girder aggiorna MongoDB
-    │     Girder invia evento a Redis → browser riceve notifica
+    ├─ notifies Girder: state → RUNNING
+    │     Girder updates MongoDB
+    │     Girder sends an event to Redis → browser receives notification
     │
     ├─ GET /api/v1/file/{file_id}/download
-    │     scarica il file NIfTI dall'assetstore tramite REST
+    │     downloads the NIfTI file from the assetstore via REST
     │
-    ├─ esegue MRIQC localmente nel container
-    │     (tool neuroimaging installato nell'immagine Docker)
+    ├─ runs MRIQC locally in the container
+    │     (neuroimaging tool installed in the Docker image)
     │
-    └─ carica i risultati su Girder
-          POST /api/v1/item  (crea item risultato)
-          PUT  /api/v1/file  (carica report HTML/JSON)
+    └─ uploads the results to Girder
+          POST /api/v1/item  (creates the result item)
+          PUT  /api/v1/file  (uploads HTML/JSON report)
 
 
-  FASE 3 – Completamento
+  PHASE 3 – Completion
   ════════════════════════════════════════════════════
   diadema-mriqc-worker
     │
-    └─ notifica Girder: stato → SUCCESS (o ERROR)
-          Girder aggiorna MongoDB
-          Girder invia evento a Redis → browser riceve notifica finale
+    └─ notifies Girder: state → SUCCESS (or ERROR)
+          Girder updates MongoDB
+          Girder sends an event to Redis → browser receives final notification
 
 
-  STATO FINALE
+  FINAL STATE
   ════════════════════════════════════════════════════
   Browser
-    │  (ha ricevuto notifica via Server-Sent Events)
+    │  (has received the notification via Server-Sent Events)
     └─ GET /api/v1/job/{job_id}
-         ritorna { status: "success", output_item_id: "xyz" }
+         returns { status: "success", output_item_id: "xyz" }
 ```
 
-### Diagramma degli stati del job
+### Job state diagram
 
 ```
   QUEUED ──────► RUNNING ──────► SUCCESS
@@ -272,184 +272,185 @@ Sequenza completa dalla richiesta dell'utente al completamento:
 
 ---
 
-## 8. Come i worker comunicano con Girder
+## 8. How the workers communicate with Girder
 
-I worker **non hanno accesso diretto a MongoDB**. Tutta la comunicazione avviene tramite le REST API di Girder, usando un **token temporaneo** generato da Girder nel momento in cui crea il job.
+The workers **have no direct access to MongoDB**. All communication happens through Girder's REST API, using a **temporary token** generated by Girder at the moment it creates the job.
 
 ```
   Worker                              Girder (HTTP)
     │                                      │
     ├── GET  /api/v1/file/{id}/download ──►│
-    │◄─ stream del file binario ───────────┤
+    │◄─ binary file stream ────────────────┤
     │                                      │
     ├── POST /api/v1/item              ───►│
     │◄─ { item_id }                ────────┤
     │                                      │
     ├── PUT  /api/v1/file?parentId=...  ──►│
-    │   (upload risultato)                 │
+    │   (upload result)                    │
     │◄─ { file_id }                ────────┤
     │                                      │
     └── PUT  /api/v1/job/{id}          ───►│
-        { status: "success" }             │
+        { status: "success" }              │
                                            │
-                                    aggiorna MongoDB
-                                    notifica Redis → browser
+                                    updates MongoDB
+                                    notifies Redis → browser
 ```
 
-Questo design ha vantaggi importanti:
-- il worker **non ha credenziali di database** → sicurezza
-- il token temporaneo ha **permessi limitati** al job specifico
-- il worker può girare su una **macchina diversa** da Girder (scale-out)
+This design has important advantages:
+- the worker **has no database credentials** → security
+- the temporary token has **permissions limited** to the specific job
+- the worker can run on a **different machine** than Girder (scale-out)
 
-> Nel deploy completo (`deploy/full`) questa comunicazione worker↔Girder
-> **non avviene più in chiaro**: i worker chiamano `https://nginx/api/v1`,
-> con verifica del certificato contro una CA interna. Vedi la
-> [sezione 12 – Sicurezza della comunicazione (TLS/HTTPS)](#12-sicurezza-della-comunicazione-tlshttps).
+> In the full deployment (`deploy/full`) this worker↔Girder communication
+> **no longer travels in clear text**: the workers call `https://nginx/api/v1`,
+> verifying the certificate against an internal CA. See
+> [section 12 – Communication security (TLS/HTTPS)](#12-communication-security-tlshttps).
 
 ---
 
-## 9. Worker specializzati vs. worker generico
+## 9. Specialized workers vs. generic worker
 
 ```
   ┌────────────────┬──────────────┬──────────────────────────────────┐
-  │    Container   │    Coda      │  Cosa esegue                     │
+  │   Container    │    Queue     │  What it runs                    │
   ├────────────────┼──────────────┼──────────────────────────────────┤
-  │ celery-worker  │ celery       │ Job generici di Girder Worker    │
-  │                │              │ (es. conversioni, operazioni su  │
-  │                │              │  file non specializzate)         │
+  │ celery-worker  │ celery       │ Generic Girder Worker jobs       │
+  │                │              │ (e.g. conversions, non-          │
+  │                │              │  specialized file operations)    │
   ├────────────────┼──────────────┼──────────────────────────────────┤
-  │diadema-mriqc   │ diadema_mriqc│ MRIQC pipeline DIADEMA           │
-  │   -worker      │              │ (versione custom della pipeline) │
+  │diadema-mriqc   │ diadema_mriqc│ DIADEMA MRIQC pipeline           │
+  │   -worker      │              │ (custom version of the pipeline) │
   ├────────────────┼──────────────┼──────────────────────────────────┤
-  │freesurfer      │ freesurfer   │ Analisi corticale FreeSurfer     │
-  │  -worker       │              │ (FreeSurfer completo installato  │
-  │                │              │  nell'immagine, richiede licenza)│
+  │freesurfer      │ freesurfer   │ FreeSurfer cortical analysis     │
+  │  -worker       │              │ (full FreeSurfer installed in    │
+  │                │              │  the image, requires a license)  │
   └────────────────┴──────────────┴──────────────────────────────────┘
 ```
 
-I worker specializzati (mriqc, freesurfer) usano **immagini Docker dedicate** perché i tool neuroimaging che contengono (nipreps/mriqc, FreeSurfer) sono software pesanti (decine di GB) che non devono stare nell'immagine base di Girder.
+The specialized workers (mriqc, freesurfer) use **dedicated Docker images** because the neuroimaging tools they contain (nipreps/mriqc, FreeSurfer) are heavy pieces of software (tens of GB) that should not live in Girder's base image.
 
 ---
 
-## 10. I volumi Docker
+## 10. The Docker volumes
 
 ```
   ┌──────────────────────────────────────────────────────────────────┐
-  │                        Volumi persistenti                        │
+  │                        Persistent volumes                        │
   │                                                                  │
-  │  mongodb_data          → database MongoDB                        │
-  │  rabbitmq_data         → code e messaggi RabbitMQ               │
-  │  girder_data           → cache pip, dati locali utente girder    │
-  │  girder_assetstore     → file binari caricati dagli utenti       │
-  │  diadema_mriqc_data    → output MRIQC generati dal worker        │
-  │  diadema_subjects_data → soggetti FreeSurfer (può essere >100GB) │
+  │  mongodb_data          → MongoDB database                        │
+  │  rabbitmq_data         → RabbitMQ queues and messages            │
+  │  girder_data           → pip cache, girder user local data       │
+  │  girder_assetstore     → binary files uploaded by users          │
+  │  diadema_mriqc_data    → MRIQC output produced by the worker     │
+  │  diadema_subjects_data → FreeSurfer subjects (can be >100GB)     │
   └──────────────────────────────────────────────────────────────────┘
 
-  Nota: girder_assetstore è condiviso solo dal container girder.
-  I worker accedono ai file SEMPRE tramite le API di Girder,
-  mai montando direttamente il volume dell'assetstore.
+  Note: girder_assetstore is shared only by the girder container.
+  The workers ALWAYS access files through Girder's API,
+  never by mounting the assetstore volume directly.
 ```
 
 ---
 
-## 11. Porte esposte sull'host
+## 11. Ports exposed on the host
 
-Le porte visibili dall'esterno dipendono dallo stack.
+The externally visible ports depend on the stack.
 
-**Stack dev (`docker-compose.yml` di root)** – HTTP, comodo per lo sviluppo:
-
-```
-  HOST
-  ├── :8080  →  Girder HTTP (UI + API REST)
-  └── :15672 →  RabbitMQ Management UI (diagnostica)
-
-  Tutto il resto (MongoDB :27017, Redis :6379, code interne)
-  è accessibile SOLO tra i container sulla rete interna.
-```
-
-**Stack completo (`deploy/full`)** – l'unico entry point pubblico è nginx, in HTTPS:
+**Dev stack (root `docker-compose.yml`)** – HTTP, convenient for development:
 
 ```
   HOST
-  ├── :80    →  nginx  → redirect 301 verso :443
-  ├── :443   →  nginx  → TLS terminato qui, proxy interno verso girder:8080
-  ├── :8081  →  Girder diretto (solo admin/debug, dietro al proxy)
-  └── :15672 →  RabbitMQ Management UI (diagnostica)
+  ├── :8080  →  Girder HTTP (UI + REST API)
+  └── :15672 →  RabbitMQ Management UI (diagnostics)
+
+  Everything else (MongoDB :27017, Redis :6379, internal queues)
+  is reachable ONLY between the containers on the internal network.
 ```
 
-Vedi la [sezione 12 – Sicurezza della comunicazione (TLS/HTTPS)](#12-sicurezza-della-comunicazione-tlshttps)
-per i dettagli sul TLS.
+**Full stack (`deploy/full`)** – the only public entry point is nginx, over HTTPS:
+
+```
+  HOST
+  ├── :80    →  nginx  → 301 redirect to :443
+  ├── :443   →  nginx  → TLS terminated here, internal proxy to girder:8080
+  ├── :8081  →  Girder direct (admin/debug only, behind the proxy)
+  └── :15672 →  RabbitMQ Management UI (diagnostics)
+```
+
+See [section 12 – Communication security (TLS/HTTPS)](#12-communication-security-tlshttps)
+for the TLS details.
 
 ---
 
-## 12. Sicurezza della comunicazione (TLS/HTTPS)
+## 12. Communication security (TLS/HTTPS)
 
-Nello **stack completo (`deploy/full`)** tutto il traffico applicativo è cifrato: sia
-quello del browser verso l'interfaccia, sia — punto cruciale — quello dei **job**
-(worker → Girder). La terminazione TLS avviene su **nginx**; dietro al proxy, sulla rete
-Docker interna isolata, il traffico resta in HTTP verso `girder:8080`.
+In the **full stack (`deploy/full`)** all application traffic is encrypted: both the
+browser traffic to the interface and — crucially — the **job** traffic
+(worker → Girder). TLS is terminated at **nginx**; behind the proxy, on the isolated
+internal Docker network, traffic stays in HTTP towards `girder:8080`.
 
 ```
-  browser ──HTTPS──▶ nginx:443 ──HTTP (rete interna)──▶ girder:8080
-  worker  ──HTTPS──▶ nginx:443 ──HTTP (rete interna)──▶ girder:8080
+  browser ──HTTPS──▶ nginx:443 ──HTTP (internal network)──▶ girder:8080
+  worker  ──HTTPS──▶ nginx:443 ──HTTP (internal network)──▶ girder:8080
                        ▲
-                       └─ certificato server, SAN: nginx, localhost,
+                       └─ server certificate, SAN: nginx, localhost,
                           ${DIADEMA_PUBLIC_HOST}, 127.0.0.1
 ```
 
-### CA interna e generazione dei certificati (`init-certs`)
+### Internal CA and certificate generation (`init-certs`)
 
-Un servizio di init dedicato, **`init-certs`**, genera al primo avvio una **CA interna
-self-signed** e un certificato server, salvati in un volume condiviso (`certs`):
+A dedicated init service, **`init-certs`**, generates an **internal self-signed CA** and a
+server certificate at first startup, stored in a shared volume (`certs`):
 
 ```
   [1] MongoDB, Redis, RabbitMQ  (healthy)
-  [2] init-permissions          (volume assetstore scrivibile)
-  [2] init-certs                (genera ca.crt/ca.key + server.crt/server.key)
-        │  - idempotente: se server.crt esiste già, non rigenera nulla
+  [2] init-permissions          (assetstore volume writable)
+  [2] init-certs                (generates ca.crt/ca.key + server.crt/server.key)
+        │  - idempotent: if server.crt already exists, it regenerates nothing
         │  - SAN: DNS:nginx, DNS:localhost, DNS:${DIADEMA_PUBLIC_HOST}, IP:127.0.0.1
         ▼
-  [3] Girder Server  →  [4] nginx + worker  (montano il volume `certs` in sola lettura)
+  [3] Girder Server  →  [4] nginx + workers  (mount the `certs` volume read-only)
 ```
 
-La CA non viene mai versionata: vive solo nel volume Docker. Il browser mostrerà un
-avviso sul certificato self-signed finché non si importa `ca.crt` nel proprio trust store
-(estraibile con `docker compose cp nginx:/etc/nginx/certs/ca.crt ./ca.crt`).
+The CA is never committed: it lives only in the Docker volume. The browser will show a
+warning about the self-signed certificate until `ca.crt` is imported into the local trust
+store (extractable with `docker compose cp nginx:/etc/nginx/certs/ca.crt ./ca.crt`).
 
-### Verifica del certificato nei job
+### Certificate verification in the jobs
 
-I worker chiamano Girder su `https://nginx/api/v1` (variabili `GIRDER_API_URL` e
-`GIRDER_WORKER_CALLBACK_URL`). La verifica del certificato **non è disabilitata**: ogni
-container client (girder + worker) monta la CA e la indica via la variabile standard
-**`REQUESTS_CA_BUNDLE=/etc/nginx/certs/ca.crt`**, così `GirderClient`/`requests`
-validano la catena contro la CA interna. Un certificato non valido fa fallire la chiamata.
+The workers call Girder over `https://nginx/api/v1` (`GIRDER_API_URL` and
+`GIRDER_WORKER_CALLBACK_URL` variables). Certificate verification is **not disabled**: each
+client container (girder + workers) mounts the CA and points to it via the standard
+**`REQUESTS_CA_BUNDLE=/etc/nginx/certs/ca.crt`** variable, so `GirderClient`/`requests`
+validate the chain against the internal CA. An invalid certificate makes the call fail.
 
 ```
   worker
     │  GirderClient(apiUrl="https://nginx/api/v1")
-    │  requests verifica il cert con REQUESTS_CA_BUNDLE → ca.crt
+    │  requests verifies the cert with REQUESTS_CA_BUNDLE → ca.crt
     ▼
   nginx (TLS) ──▶ girder:8080
 ```
 
-### Redirect HTTP→HTTPS
+### HTTP→HTTPS redirect
 
-nginx accetta la porta 80 solo per reindirizzare (`301`) verso `https://`. Nessun
-contenuto applicativo viaggia in chiaro. L'header `X-Forwarded-Proto: https` viene
-propagato a Girder così che gli URL pubblici generati siano coerenti.
+nginx accepts port 80 only to redirect (`301`) to `https://`. No application content
+travels in clear text. The `X-Forwarded-Proto: https` header is propagated to Girder so
+that the public URLs it generates are consistent.
 
-### Loopback interno del server
+### Server internal loopback
 
-Alcune route REST del plugin istanziano un `GirderClient` che richiama la **stessa** istanza
-Girder durante una request del browser. Con `X-Forwarded-Proto: https` l'URL ricavato dalla
-request diventerebbe l'indirizzo pubblico HTTPS, facendo uscire inutilmente la chiamata in
-rete (hairpin verso nginx). Per questo tali chiamate usano un **loopback interno** in HTTP
-(`_internal_api_url()` → `http://localhost:8080/api/v1`) che non lascia mai il container.
+Some of the plugin's REST routes instantiate a `GirderClient` that calls back into the
+**same** Girder instance during a browser request. With `X-Forwarded-Proto: https` the URL
+derived from the request would become the public HTTPS address, causing the call to
+needlessly leave through the network (hairpin via nginx). For this reason those calls use
+an **internal loopback** over HTTP (`_internal_api_url()` → `http://localhost:8080/api/v1`)
+that never leaves the container.
 
-### Limiti attuali (fuori scope)
+### Current limits (out of scope)
 
-- Lo **stack dev** di root resta in HTTP puro (comodità di sviluppo).
-- Il broker **RabbitMQ** (AMQP), **MongoDB** e **Redis** comunicano in chiaro ma **solo**
-  sulla rete Docker interna, non esposti all'host.
-- Non è previsto un certificato pubblico (es. Let's Encrypt): la fiducia si basa sulla CA
-  interna, adatta alla comunicazione tra container.
+- The **dev stack** at the root stays pure HTTP (development convenience).
+- The **RabbitMQ** broker (AMQP), **MongoDB** and **Redis** communicate in clear text but
+  **only** on the internal Docker network, not exposed to the host.
+- A public certificate (e.g. Let's Encrypt) is not provided: trust is based on the internal
+  CA, suitable for container-to-container communication.

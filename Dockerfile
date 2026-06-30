@@ -53,11 +53,11 @@ RUN mkdir /girder && \
     chown -R girder:girder /girder /home/girder /workspace /opt/venv
 
 # Girder (pinned commit)
-RUN git clone https://github.com/girder/girder.git /girder && \
+RUN git config --global --add safe.directory /girder && \
+    git clone https://github.com/girder/girder.git /girder && \
     cd /girder && git checkout "$GIRDER_COMMIT"
 RUN cd /girder/girder/web && npm i && npm run build
-RUN git config --global --add safe.directory /girder && \
-    pip install --no-cache-dir /girder
+RUN pip install --no-cache-dir /girder
 
 # ── Plugin: oauth2 ───────────────────────────────────────────────────────────
 COPY ./oauth2 /plugins/oauth2

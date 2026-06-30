@@ -23,7 +23,6 @@ logger = logging.getLogger(__name__)
 
 class DiademaPlugin(GirderPlugin):
     DISPLAY_NAME = "DIADEMA Pipeline"
-    CLIENT_SOURCE_PATH = "web_client"
 
     def load(self, info):
         from .rest import DiademaResource

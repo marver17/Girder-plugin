@@ -22,7 +22,7 @@ setup(
     packages=find_packages(exclude=['plugin_tests']),
     zip_safe=False,
     install_requires=[
-        'girder>=3',
+        'girder>=5.0.0a1',
         'msal',
         'pyjwt>=2,<3',
     ],

@@ -7,10 +7,10 @@ name = "girder-nifti-viewer"
 version = "1.0.0"
 description = "View NIfTI neuroimaging files in Girder with BIDS support and advanced metadata search"
 readme = "README.md"
-requires-python = ">=3.8"
+requires-python = ">=3.10"
 license = {text = "Apache Software License 2.0"}
 authors = [
-    {name = "Your Organization", email = "contact@example.com"}
+    {name = "Mario Verdicchio", email = "marioverd95@gmail.com"}
 ]
 keywords = ["girder", "nifti", "neuroimaging", "bids", "medical-imaging", "viewer"]
 classifiers = [
@@ -20,16 +20,15 @@ classifiers = [
     "Operating System :: OS Independent",
     "Programming Language :: Python",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.8",
-    "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
     "Topic :: Scientific/Engineering :: Medical Science Apps.",
     "Topic :: Scientific/Engineering :: Visualization",
 ]
 
 dependencies = [
-    "girder>=4.0.0",
+    "girder>=5.0.0a1",
     "nibabel>=4.0.0",
     "numpy>=1.20.0",
 ]
@@ -47,11 +46,10 @@ dev = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/yourorg/girder-nifti-viewer"
-Documentation = "https://github.com/yourorg/girder-nifti-viewer/blob/main/README.md"
-Repository = "https://github.com/yourorg/girder-nifti-viewer"
-Changelog = "https://github.com/yourorg/girder-nifti-viewer/blob/main/CHANGELOG.md"
-"Bug Tracker" = "https://github.com/yourorg/girder-nifti-viewer/issues"
+Homepage = "https://github.com/marver17/Girder-plugin"
+Documentation = "https://github.com/marver17/Girder-plugin/blob/main/README.md"
+Repository = "https://github.com/marver17/Girder-plugin"
+"Bug Tracker" = "https://github.com/marver17/Girder-plugin/issues"
 
 [project.entry-points."girder.plugin"]
 nifti_viewer = "girder_nifti_viewer:NiftiViewerPlugin"

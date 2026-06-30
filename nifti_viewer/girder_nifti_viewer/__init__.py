@@ -22,7 +22,6 @@ from .widget_rest import WidgetResource
 
 class NiftiViewerPlugin(GirderPlugin):
     DISPLAY_NAME = "NIfTI Viewer"
-    CLIENT_SOURCE_PATH = "web_client"
 
     def load(self, info):
         # Expose the 'nifti' field on items

@@ -4,7 +4,7 @@
 # poi avvia il processo specificato come argomento.
 #
 # Uso:
-#   entrypoint-girder.sh serve   → girder serve
+#   entrypoint-girder.sh serve   → uvicorn girder.asgi:app
 #   entrypoint-girder.sh worker  → celery worker (coda 'celery')
 
 set -e
@@ -29,7 +29,7 @@ install_plugins() {
             # impedire l'avvio del container.
             rm -rf "$plugin/build" "$plugin"/*.egg-info 2>/dev/null || true
             echo "  pip install $plugin"
-            pip install --break-system-packages -q --no-build-isolation $PIP_NO_PEP517_FLAG \
+            pip install -q --no-build-isolation $PIP_NO_PEP517_FLAG \
                 "$plugin"
         fi
     done
@@ -81,8 +81,10 @@ run_bootstrap() {
 case "${1:-serve}" in
     serve)
         run_bootstrap
-        echo "=== Avvio Girder server ==="
-        exec girder serve --host 0.0.0.0 --database "$GIRDER_MONGO_URI"
+        echo "=== Avvio Girder server (uvicorn / ASGI) ==="
+        # Girder 5 espone l'app ASGI in girder.asgi:app e legge la connessione
+        # MongoDB dalla variabile d'ambiente GIRDER_MONGO_URI (vedi compose).
+        exec uvicorn girder.asgi:app --host 0.0.0.0 --port "${GIRDER_PORT:-8080}"
         ;;
     worker)
         echo "=== Avvio Celery worker (coda: celery) ==="

@@ -1,19 +1,26 @@
 ######### Dockerfile for Girder 5 #########
-# using fork suggest by Paul
+# Builds a Girder 5 server image with the DIADEMA plugins
+# (oauth2, nifti_viewer, diadema_pipeline) pre-installed.
+#
+# Girder is served as an ASGI app via uvicorn, as recommended by the
+# Girder 5 deployment guide:
+#   https://girder.readthedocs.io/en/latest/deployment.html
 
 FROM ubuntu:22.04
 
-LABEL maintainer="Kitware, Inc. <kitware@kitware.com>"
+LABEL maintainer="Mario Verdicchio <marioverd95@gmail.com>"
 
 ENV DEBIAN_FRONTEND=noninteractive \
     LANG=en_US.UTF-8 \
     LC_ALL=C.UTF-8
 
+# Pinned Girder commit for reproducible builds (matches the worker images).
+ENV GIRDER_COMMIT=203cd86a409e0b3a88d619508b7372210ced7a60
 
-RUN apt-get update 
-RUN apt-get install -qy \
+RUN apt-get update && apt-get install -qy \
     gcc \
     libpython3-dev \
+    python3-venv \
     git \
     libldap2-dev \
     libsasl2-dev \
@@ -22,69 +29,61 @@ RUN apt-get install -qy \
     locales \
     ca-certificates \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
-RUN python3 -m pip install --upgrade --no-cache-dir  \
-    setuptools \
-    setuptools_scm \
-    wheel \
-    pip
 
-# Creare utente non-root
+# Non-root user
 RUN groupadd -g 1000 girder && \
     useradd -m -u 1000 -g girder -s /bin/bash girder
 
+# tini for correct signal handling / zombie reaping (PID 1)
 RUN curl -LJ https://github.com/krallin/tini/releases/download/v0.19.0/tini -o /sbin/tini && \
     chmod +x /sbin/tini
 
+# Node.js (for building plugin web clients)
 RUN curl -sL https://deb.nodesource.com/setup_22.x | bash - && \
-    apt-get install -qy nodejs
+    apt-get install -qy nodejs && \
+    apt-get clean && rm -rf /var/lib/apt/lists/*
 
-ENV PATH="/usr/local/node:$PATH"
+# Isolated virtualenv instead of --break-system-packages (PEP 668)
+RUN python3 -m venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
+RUN pip install --no-cache-dir --upgrade pip setuptools wheel "uvicorn[standard]"
 
-RUN mkdir /girder
-WORKDIR /girder
+RUN mkdir /girder && \
+    mkdir -p /home/girder/.local/share/girder /workspace && \
+    chown -R girder:girder /girder /home/girder /workspace /opt/venv
 
-# Configurare ownership per girder e workspace
-RUN mkdir -p /home/girder/.local/share/girder /workspace && \
-    chown -R girder:girder /girder /home/girder /workspace 
-
-RUN git clone --single-branch https://github.com/girder/girder.git /girder
-
+# Girder (pinned commit)
+RUN git clone https://github.com/girder/girder.git /girder && \
+    cd /girder && git checkout "$GIRDER_COMMIT"
 RUN cd /girder/girder/web && npm i && npm run build
-
 RUN git config --global --add safe.directory /girder && \
-    pip install --break-system-packages /girder
-
-# COPY plugins.txt /girder/plugins.txt
-# RUN pip3 install -r /girder/plugins.txt
-
-
+    pip install --no-cache-dir /girder
 
 # ── Plugin: oauth2 ───────────────────────────────────────────────────────────
 COPY ./oauth2 /plugins/oauth2
-RUN pip install --break-system-packages /plugins/oauth2
+RUN pip install --no-cache-dir /plugins/oauth2
 
-# ── Plugin: nifti_viewer (con build frontend) ─────────────────────────────────
+# ── Plugin: nifti_viewer (with frontend build) ───────────────────────────────
 COPY ./nifti_viewer /plugins/nifti_viewer
 RUN cd /plugins/nifti_viewer/girder_nifti_viewer/web_client && \
     npm install && npm run build
-RUN pip install --break-system-packages /plugins/nifti_viewer
+RUN pip install --no-cache-dir /plugins/nifti_viewer
 
-# ── Plugin: diadema_pipeline (con build frontend) ─────────────────────────────
+# ── Plugin: diadema_pipeline (with frontend build) ───────────────────────────
 COPY ./diadema_pipeline /plugins/diadema_pipeline
 RUN cd /plugins/diadema_pipeline/girder_diadema_pipeline/web_client && \
     npm install && npm run build
-RUN pip install --break-system-packages /plugins/diadema_pipeline
+RUN pip install --no-cache-dir /plugins/diadema_pipeline
 
-# Pulizia cache npm per ridurre la dimensione dell'immagine
+# Trim npm cache to reduce image size
 RUN npm cache clean --force
 
 EXPOSE 8080
 
-# Create startup script for Girder
-RUN echo '#!/bin/bash\nexec girder serve "$@"' > /usr/local/bin/start-girder.sh && \
-    chmod +x /usr/local/bin/start-girder.sh
-
-# Switch a utente non-root
 USER girder
 
-ENTRYPOINT ["/bin/bash"]
+# tini as PID 1; default command serves Girder's ASGI app via uvicorn.
+# (deploy/* compose files override `command` to run the entrypoint script,
+#  which bootstraps Girder and then execs uvicorn.)
+ENTRYPOINT ["/sbin/tini", "--"]
+CMD ["uvicorn", "girder.asgi:app", "--host", "0.0.0.0", "--port", "8080"]

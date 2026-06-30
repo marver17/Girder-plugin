@@ -76,7 +76,7 @@ All'avvio dello stack, i container si avviano in ordine garantito dalle dipenden
         │  │     ├── crea assetstore se non esiste
         │  │     ├── applica impostazioni (brand, policy registrazione, ...)
         │  │     └── crea utente admin se non esiste
-        │  └─ avvia girder serve
+        │  └─ avvia uvicorn girder.asgi:app (ASGI)
         │  (healthcheck: risponde su /api/v1/system/version)
         ▼
   [4] Tutti i worker

@@ -62,7 +62,7 @@ with open('README.md', 'r', encoding='utf-8') as f:
 # Perform the install
 setup(
     name='girder-nifti-viewer',
-    version='1.1.0',
+    version='1.0.0',
     description='View NIfTI neuroimaging files in Girder with BIDS support and advanced metadata search',
     long_description=long_description,
     long_description_content_type='text/markdown',

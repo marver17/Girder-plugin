@@ -40,7 +40,7 @@ services:
   # ── Infrastruttura ──────────────────────────────────────────────────────────
 
   mongodb:
-    image: mongo:4.4
+    image: mongo:7.0
     container_name: diadema-test-mongodb
     networks: [diadema-test-net]
     volumes:
@@ -49,7 +49,7 @@ services:
       MONGO_INITDB_DATABASE: ${MONGO_DB:-girder}
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "mongo", "--eval", "db.adminCommand('ping')"]
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping')"]
       interval: 10s
       timeout: 5s
       retries: 5

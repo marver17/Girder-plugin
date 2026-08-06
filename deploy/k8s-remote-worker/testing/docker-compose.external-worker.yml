@@ -1,0 +1,42 @@
+# ═══════════════════════════════════════════════════════════════════
+# DIADEMA – Simulazione locale di un worker "esterno".
+# ═══════════════════════════════════════════════════════════════════
+# Non è collegato a `diadema-full-network`: raggiunge lo stack SOLO
+# attraverso le porte pubblicate sull'host (network_mode: host), esattamente
+# come farebbe un worker sul cluster K8s remoto attraverso il tunnel
+# WireGuard — nessun nome di servizio Docker (rabbitmq/mongodb/girder)
+# risolvibile, nessuna rotta verso la rete interna. Vedi TESTING.md.
+#
+# Uso:
+#   docker compose -f docker-compose.external-worker.yml up
+# ═══════════════════════════════════════════════════════════════════
+
+services:
+  external-mriqc-worker:
+    image: diadema-diadema-mriqc-worker:latest
+    container_name: diadema-test-external-mriqc-worker
+    network_mode: host
+    environment:
+      CELERY_BROKER_URL: "amqps://${REMOTE_WORKER_USER}:${REMOTE_WORKER_PASS}@127.0.0.1:${RABBITMQ_AMQPS_PORT:-5671}//"
+      CELERY_RESULT_BACKEND: "rpc://"
+      CELERY_BROKER_HEARTBEAT: "0"
+      CELERY_WORKER_CANCEL_LONG_RUNNING_TASKS_ON_CONNECTION_LOSS: "true"
+      C_FORCE_ROOT: "1"
+      # 127.0.0.1 è nel SAN del certificato generato da init-certs: nessuna
+      # rigenerazione di certificati necessaria per questo test locale.
+      GIRDER_API_URL: "https://127.0.0.1:${NGINX_HTTPS_PORT:-443}/api/v1"
+      REQUESTS_CA_BUNDLE: /etc/diadema/certs/ca.crt
+      DIADEMA_MRIQC_OUTPUT_DIR: /data/diadema/mriqc
+      PYTHONUNBUFFERED: "1"
+    volumes:
+      - external_mriqc_output:/data/diadema/mriqc
+      # Estratto con: docker compose -f ../../full/docker-compose.yml cp nginx:/etc/nginx/certs/ca.crt ./ca.crt
+      - ./ca.crt:/etc/diadema/certs/ca.crt:ro
+    restart: "no"
+    # CMD dell'immagine punta già a --queues=diadema_mriqc (vedi
+    # diadema-mriqc-worker/Dockerfile): nessun override necessario, il
+    # worker esterno offload esattamente la pipeline scelta nel piano.
+
+volumes:
+  external_mriqc_output:
+    name: diadema-test-external-mriqc-output

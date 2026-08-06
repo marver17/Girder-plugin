@@ -1,0 +1,38 @@
+# Egress ristretto per i pod worker DIADEMA nel cluster remoto: possono
+# raggiungere SOLO il pod gateway WireGuard (wireguard-gateway.yaml), che
+# inoltra AMQPS/HTTPS attraverso il tunnel, e la risoluzione DNS interna del
+# cluster (per risolvere il Service `wireguard-gateway`). Nessun altro
+# traffico in uscita è permesso — in particolare nessun accesso diretto a
+# MongoDB/Redis, mai raggiungibili da qui.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: diadema-remote-worker-egress
+  namespace: diadema-remote
+spec:
+  podSelector:
+    matchLabels:
+      app: diadema-mriqc-worker-remote
+  policyTypes:
+    - Egress
+  egress:
+    # Solo verso il pod gateway WireGuard, sulle porte 5671 (AMQPS)/443
+    # (HTTPS) che inoltra attraverso il tunnel.
+    - to:
+        - podSelector:
+            matchLabels:
+              app: wireguard-gateway
+      ports:
+        - protocol: TCP
+          port: 5671
+        - protocol: TCP
+          port: 443
+    # DNS interno del cluster, necessario per risolvere il Service
+    # `wireguard-gateway.diadema-remote.svc.cluster.local`.
+    - to:
+        - namespaceSelector: {}
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53

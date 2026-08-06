@@ -1,0 +1,102 @@
+# ScaledJob KEDA: crea un Job Kubernetes per ogni messaggio in coda su
+# "diadema_mriqc" (fino a maxReplicaCount job paralleli), invece di tenere
+# worker sempre accesi in idle. Richiede KEDA installato sul cluster
+# remoto e il RabbitMQ scaler (keda.sh/scalers/rabbitmq).
+apiVersion: keda.sh/v1alpha1
+kind: ScaledJob
+metadata:
+  name: diadema-mriqc-worker-remote
+  namespace: diadema-remote
+spec:
+  jobTargetRef:
+    parallelism: 1
+    completions: 1
+    # Evita job appesi indefinitamente (dataset corrotto, tool in loop).
+    # Allineare a un multiplo del timeout applicativo di MRIQC (kwargs
+    # `timeout`, default 1800s in tasks/mriqc.py).
+    activeDeadlineSeconds: 5400
+    backoffLimit: 0
+    template:
+      metadata:
+        labels:
+          app: diadema-mriqc-worker-remote
+      spec:
+        priorityClassName: diadema-remote-batch
+        restartPolicy: Never
+        imagePullSecrets:
+          - name: ghcr-pull-secret
+        containers:
+          - name: diadema-mriqc-worker
+            # Pubblicata su ghcr.io/marver17/diadema-mriqc-worker (push manuale,
+            # vedi README.md prerequisito 4). Aggiornare il tag ad ogni rebuild:
+            # non c'è automazione CI che ripubblichi l'immagine ad ogni commit.
+            image: ghcr.io/marver17/diadema-mriqc-worker:latest
+            envFrom:
+              - secretRef:
+                  name: diadema-remote-rabbitmq
+            env:
+              - name: C_FORCE_ROOT
+                value: "1"
+              # Service in-namespace del gateway WireGuard (wireguard-gateway.yaml):
+              # nessun IP/hostname del sito Girder referenziato direttamente.
+              - name: GIRDER_API_URL
+                value: "https://wireguard-gateway.diadema-remote.svc.cluster.local/api/v1"
+              - name: REQUESTS_CA_BUNDLE
+                value: /etc/diadema/certs/ca.crt
+              - name: DIADEMA_MRIQC_OUTPUT_DIR
+                value: /data/diadema/mriqc
+              - name: CELERY_BROKER_HEARTBEAT
+                value: "0"
+              - name: CELERY_WORKER_CANCEL_LONG_RUNNING_TASKS_ON_CONNECTION_LOSS
+                value: "true"
+            args:
+              - "--queues=diadema_mriqc"
+              # Un job per pod: niente concurrency interna da gestire, lo
+              # scaling orizzontale lo fa KEDA creando più Job.
+              - "--concurrency=1"
+            resources:
+              # Calibrare sui valori realmente osservati per MRIQC prima di
+              # andare in produzione: placeholder prudenziali.
+              requests:
+                cpu: "2"
+                memory: "4Gi"
+              limits:
+                cpu: "4"
+                memory: "8Gi"
+            volumeMounts:
+              - name: ca-bundle
+                mountPath: /etc/diadema/certs
+                readOnly: true
+              - name: mriqc-output
+                mountPath: /data/diadema/mriqc
+        volumes:
+          - name: ca-bundle
+            secret:
+              secretName: diadema-remote-ca
+          - name: mriqc-output
+            emptyDir: {}
+  pollingInterval: 15
+  maxReplicaCount: 5
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 5
+  triggers:
+    - type: rabbitmq
+      metadata:
+        queueName: diadema_mriqc
+        # Un job per messaggio in coda: adeguato a task lunghi e pesanti
+        # come MRIQC, dove non ha senso accumulare più messaggi per pod.
+        mode: QueueLength
+        value: "1"
+      authenticationRef:
+        name: diadema-remote-rabbitmq-trigger-auth
+---
+apiVersion: keda.sh/v1alpha1
+kind: TriggerAuthentication
+metadata:
+  name: diadema-remote-rabbitmq-trigger-auth
+  namespace: diadema-remote
+spec:
+  secretTargetRef:
+    - parameter: host
+      name: diadema-remote-rabbitmq
+      key: CELERY_BROKER_URL

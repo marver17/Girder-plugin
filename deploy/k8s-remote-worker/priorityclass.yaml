@@ -1,0 +1,14 @@
+# Priorità bassa/preemptible: se il cluster remoto è condiviso con altri
+# team/workload della struttura ospitante, i job DIADEMA non devono
+# contendere risorse a carichi più critici del cluster ospitante.
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: diadema-remote-batch
+value: -100
+globalDefault: false
+preemptionPolicy: PreemptLowerPriority
+description: >-
+  Priorità per job batch DIADEMA (MRIQC/FreeSurfer/LST-AI) offloadati su
+  cluster K8s remoto: preemptibile da workload a priorità più alta del
+  cluster ospitante.

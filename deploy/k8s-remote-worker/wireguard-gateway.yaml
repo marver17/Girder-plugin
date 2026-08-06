@@ -1,0 +1,154 @@
+# Gateway WireGuard lato cluster K8s remoto — speculare a
+# deploy/full/docker-compose.yml (servizio wireguard-gateway), stesso script
+# generico (deploy/full/wireguard/entrypoint.sh, qui riprodotto in ConfigMap).
+#
+# Il cluster ha un IP fisso: fa da lato "server" del tunnel, in ascolto sulla
+# porta UDP esposta dal Service NodePort sotto. Punto-punto: nessun routing
+# L3 verso il resto dei pod, solo inoltro esplicito (socat) delle porte 5671
+# (AMQPS) e 443 (HTTPS) verso il gateway lato Girder nel tunnel.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: wireguard-gateway-entrypoint
+  namespace: diadema-remote
+data:
+  entrypoint.sh: |
+    #!/bin/sh
+    set -e
+    apk add --no-cache wireguard-tools socat >/dev/null
+    mkdir -p /etc/wireguard
+    umask 077
+    {
+      echo "[Interface]"
+      echo "PrivateKey = ${WG_PRIVATE_KEY:?WG_PRIVATE_KEY mancante}"
+      echo "Address = ${WG_ADDRESS:?WG_ADDRESS mancante}"
+      echo "ListenPort = ${WG_LISTEN_PORT:-51820}"
+      echo ""
+      echo "[Peer]"
+      echo "PublicKey = ${WG_PEER_PUBLIC_KEY:?WG_PEER_PUBLIC_KEY mancante}"
+      echo "AllowedIPs = ${WG_PEER_ALLOWED_IPS:?WG_PEER_ALLOWED_IPS mancante}"
+      [ -n "${WG_PEER_ENDPOINT:-}" ] && echo "Endpoint = ${WG_PEER_ENDPOINT}"
+      echo "PersistentKeepalive = 25"
+    } > /etc/wireguard/wg0.conf
+    wg-quick up wg0
+    cleanup() { wg-quick down wg0 || true; exit 0; }
+    trap cleanup TERM INT
+    [ -n "${FORWARD_5671_TARGET:-}" ] && socat TCP-LISTEN:5671,fork,reuseaddr "TCP:${FORWARD_5671_TARGET}" &
+    [ -n "${FORWARD_443_TARGET:-}" ] && socat TCP-LISTEN:443,fork,reuseaddr "TCP:${FORWARD_443_TARGET}" &
+    wait
+---
+# Template — NON applicare con valori reali committati. Generare le chiavi
+# con `wg genkey | tee privkey | wg pubkey > pubkey` (una coppia per lato,
+# scambiare solo le chiavi pubbliche) e creare il Secret con:
+#   kubectl -n diadema-remote create secret generic wireguard-gateway-keys \
+#     --from-literal=WG_PRIVATE_KEY=<privkey-cluster> \
+#     --from-literal=WG_PEER_PUBLIC_KEY=<pubkey-girder>
+apiVersion: v1
+kind: Secret
+metadata:
+  name: wireguard-gateway-keys
+  namespace: diadema-remote
+type: Opaque
+stringData:
+  WG_PRIVATE_KEY: "<CHIAVE_PRIVATA_CLUSTER>"
+  WG_PEER_PUBLIC_KEY: "<CHIAVE_PUBBLICA_GIRDER>"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: wireguard-gateway
+  namespace: diadema-remote
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate  # un solo peer wg0 alla volta, niente rolling update
+  selector:
+    matchLabels:
+      app: wireguard-gateway
+  template:
+    metadata:
+      labels:
+        app: wireguard-gateway
+    spec:
+      containers:
+        - name: wireguard-gateway
+          image: alpine:3
+          command: ["sh", "/scripts/entrypoint.sh"]
+          securityContext:
+            capabilities:
+              add: ["NET_ADMIN"]
+          env:
+            - name: WG_ADDRESS
+              value: "10.90.0.2/24"
+            - name: WG_PEER_ALLOWED_IPS
+              value: "10.90.0.1/32"
+            - name: WG_LISTEN_PORT
+              value: "51820"
+            # Punto-punto: il lato Girder è client dietro NAT/IP dinamico,
+            # nessun Endpoint da configurare qui — il cluster resta in ascolto.
+            - name: FORWARD_5671_TARGET
+              value: "10.90.0.1:5671"
+            - name: FORWARD_443_TARGET
+              value: "10.90.0.1:443"
+          envFrom:
+            - secretRef:
+                name: wireguard-gateway-keys
+          volumeMounts:
+            - name: entrypoint
+              mountPath: /scripts
+            - name: dev-net-tun
+              mountPath: /dev/net/tun
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "64Mi"
+            limits:
+              cpu: "500m"
+              memory: "256Mi"
+      volumes:
+        - name: entrypoint
+          configMap:
+            name: wireguard-gateway-entrypoint
+            defaultMode: 0o555
+        - name: dev-net-tun
+          hostPath:
+            path: /dev/net/tun
+            type: CharDevice
+---
+# Raggiungibile dagli altri pod del namespace (worker MRIQC) su AMQPS/HTTPS —
+# vedi networkpolicy.yaml per l'egress ristretto a questo solo Service.
+apiVersion: v1
+kind: Service
+metadata:
+  name: wireguard-gateway
+  namespace: diadema-remote
+spec:
+  selector:
+    app: wireguard-gateway
+  ports:
+    - name: amqps
+      port: 5671
+      targetPort: 5671
+    - name: https
+      port: 443
+      targetPort: 443
+---
+# Endpoint esterno del tunnel: il lato Girder si connette qui come client.
+# Azione fuori da kubectl: chiedere a chi gestisce il perimetro davanti a
+# <CLUSTER_PUBLIC_IP> di inoltrare una porta UDP verso questo NodePort (stesso
+# meccanismo già in uso per ingress-nginx su 80/443).
+apiVersion: v1
+kind: Service
+metadata:
+  name: wireguard-gateway-external
+  namespace: diadema-remote
+spec:
+  type: NodePort
+  selector:
+    app: wireguard-gateway
+  ports:
+    - name: wireguard
+      protocol: UDP
+      port: 51820
+      targetPort: 51820
+      nodePort: 30820

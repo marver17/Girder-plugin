@@ -77,19 +77,132 @@ services:
     container_name: diadema-full-rabbitmq
     networks: [diadema-full-net]
     restart: unless-stopped
+    depends_on:
+      init-rabbitmq-certs:
+        condition: service_completed_successfully
     environment:
       RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER}
       RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASS}
     volumes:
       - rabbitmq_data:/var/lib/rabbitmq
+      - rabbitmq_certs:/etc/rabbitmq/certs:ro
+      - ./rabbitmq/rabbitmq.conf:/etc/rabbitmq/conf.d/20-diadema.conf:ro
     ports:
       - "${RABBITMQ_MGMT_PORT:-15672}:15672"
+      # AMQPS per i worker remoti: esporre SOLO sull'interfaccia/subnet del
+      # tunnel WireGuard (regola firewall a livello host), mai su Internet
+      # direttamente. 5672 (AMQP in chiaro) resta interno alla rete Docker.
+      - "${RABBITMQ_AMQPS_PORT:-5671}:5671"
     healthcheck:
       test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
       interval: 10s
       timeout: 3s
       retries: 5
       start_period: 10s
+
+  # Copia i certificati generati da init-certs in un volume dedicato, di
+  # proprietà dell'utente rabbitmq. NOTA: uid/gid 100:101, non 999 — quello
+  # vale per l'immagine Debian-based, ma qui usiamo la variante
+  # rabbitmq:3-management-alpine, dove l'utente "rabbitmq" ha uid/gid
+  # diversi (verificato con `id rabbitmq` dentro l'immagine). Il volume
+  # `certs` condiviso con girder/worker resta 640 root:root e non è
+  # leggibile dal processo rabbitmq, che gira come utente non-root.
+  init-rabbitmq-certs:
+    image: alpine:3
+    container_name: diadema-full-init-rabbitmq-certs
+    networks: [diadema-full-net]
+    user: root
+    depends_on:
+      init-certs:
+        condition: service_completed_successfully
+    command:
+      - sh
+      - -c
+      - |
+        set -e
+        cp /certs/ca.crt /certs/server.crt /certs/server.key /rabbitmq-certs/
+        chown -R 100:101 /rabbitmq-certs
+        chmod 600 /rabbitmq-certs/server.key
+        chmod 644 /rabbitmq-certs/ca.crt /rabbitmq-certs/server.crt
+        echo "Certificati copiati per RabbitMQ (owner uid/gid 100:101, immagine alpine)"
+    volumes:
+      - certs:/certs:ro
+      - rabbitmq_certs:/rabbitmq-certs
+    restart: "no"
+
+  # Crea (idempotente, via API management) l'utente dedicato ai worker
+  # remoti, sullo STESSO vhost "/" dei worker locali (un vhost separato
+  # isolerebbe il worker remoto dalle code esistenti e richiederebbe di
+  # cambiare anche il lato produttore dei task). L'isolamento è dato dai
+  # permessi, ristretti via regex alle sole code che si sceglie di
+  # offloadare (default: diadema_mriqc) — non alle code degli altri
+  # worker (celery, freesurfer, lstai) né a exchange/management.
+  init-rabbitmq-remote:
+    image: alpine:3
+    container_name: diadema-full-init-rabbitmq-remote
+    networks: [diadema-full-net]
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    environment:
+      RABBITMQ_USER: ${RABBITMQ_USER}
+      RABBITMQ_PASS: ${RABBITMQ_PASS}
+      REMOTE_WORKER_USER: ${REMOTE_WORKER_USER:-remote-worker}
+      REMOTE_WORKER_PASS: ${REMOTE_WORKER_PASS:-changeme_remote_worker}
+      # Regex sui nomi di coda/exchange accessibili al worker remoto.
+      # Aggiungere altre code (es. "|freesurfer|lstai") solo se si
+      # offloadano da remoto anche quelle pipeline.
+      REMOTE_WORKER_QUEUES_REGEX: ${REMOTE_WORKER_QUEUES_REGEX:-^diadema_mriqc$}
+    command:
+      - sh
+      - -c
+      - |
+        set -e
+        apk add --no-cache curl >/dev/null
+        BASE="http://rabbitmq:15672/api"
+        AUTH="${RABBITMQ_USER}:${RABBITMQ_PASS}"
+        curl -sf -u "$$AUTH" -X PUT "$$BASE/users/$$REMOTE_WORKER_USER" \
+          -H "content-type: application/json" \
+          -d "{\"password\":\"$$REMOTE_WORKER_PASS\",\"tags\":\"\"}"
+        curl -sf -u "$$AUTH" -X PUT "$$BASE/permissions/%2F/$$REMOTE_WORKER_USER" \
+          -H "content-type: application/json" \
+          -d "{\"configure\":\"$$REMOTE_WORKER_QUEUES_REGEX\",\"write\":\"$$REMOTE_WORKER_QUEUES_REGEX\",\"read\":\"$$REMOTE_WORKER_QUEUES_REGEX\"}"
+        echo "Utente '$$REMOTE_WORKER_USER' pronto su vhost '/' (permessi limitati a: $$REMOTE_WORKER_QUEUES_REGEX)"
+    restart: "no"
+
+  # ── Gateway WireGuard verso il cluster K8s remoto ───────────────────────────
+  # Tunnel punto-punto: nessun routing L3 verso il resto della rete Docker,
+  # solo inoltro esplicito (socat) delle porte 5671 (RabbitMQ AMQPS) e 443
+  # (nginx HTTPS) verso il peer nel tunnel. Il cluster K8s (IP fisso) fa da
+  # lato "server" WireGuard: qui non serve aprire nessuna porta in ingresso,
+  # solo traffico UDP in uscita verso WG_PEER_ENDPOINT. Vedi
+  # deploy/k8s-remote-worker/wireguard-gateway.yaml per il lato speculare.
+  wireguard-gateway:
+    image: alpine:3
+    container_name: diadema-full-wireguard-gateway
+    networks: [diadema-full-net]
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      nginx:
+        condition: service_started
+    cap_add: [NET_ADMIN]
+    devices:
+      - /dev/net/tun
+    environment:
+      WG_PRIVATE_KEY: ${WG_PRIVATE_KEY:?impostare WG_PRIVATE_KEY in .env}
+      WG_ADDRESS: ${WG_ADDRESS:-10.90.0.1/24}
+      WG_LISTEN_PORT: ${WG_LISTEN_PORT:-51820}
+      WG_PEER_PUBLIC_KEY: ${WG_PEER_PUBLIC_KEY:?impostare WG_PEER_PUBLIC_KEY in .env}
+      WG_PEER_ALLOWED_IPS: ${WG_PEER_ALLOWED_IPS:-10.90.0.2/32}
+      # host:porta pubblicati dal cluster K8s remoto (Service NodePort UDP).
+      WG_PEER_ENDPOINT: ${WG_PEER_ENDPOINT:?impostare WG_PEER_ENDPOINT in .env (IP fisso cluster:porta NodePort)}
+      FORWARD_5671_TARGET: rabbitmq:5671
+      FORWARD_443_TARGET: nginx:443
+    volumes:
+      - ./wireguard/entrypoint.sh:/entrypoint.sh:ro
+    command: ["sh", "/entrypoint.sh"]
+    restart: unless-stopped
 
   init-permissions:
     image: alpine:3
@@ -119,6 +232,12 @@ services:
     user: root
     environment:
       DIADEMA_PUBLIC_HOST: ${DIADEMA_PUBLIC_HOST:-localhost}
+      # SAN aggiuntivi separati da virgola (es. il Service K8s del gateway
+      # WireGuard per i worker remoti: "wireguard-gateway.diadema-remote.svc.cluster.local").
+      # Necessario perché il client TLS (kombu/amqps) verifica l'hostname a
+      # cui si connette, non solo la catena di certificazione: senza il SAN
+      # corrispondente la connessione fallirebbe anche con la CA corretta.
+      DIADEMA_EXTRA_SAN: ${DIADEMA_EXTRA_SAN:-}
     command:
       - sh
       - -c
@@ -136,11 +255,17 @@ services:
         # $$ lascia la variabile alla shell del container (espansa da `environment`,
         # con default localhost). Con $ singolo la sostituirebbe docker compose,
         # producendo un SAN vuoto se la var non è nel .env.
-        echo "Genero certificato server (SAN: nginx, localhost, $$DIADEMA_PUBLIC_HOST, 127.0.0.1)..."
+        SAN="DNS:nginx,DNS:localhost,DNS:$$DIADEMA_PUBLIC_HOST,IP:127.0.0.1"
+        if [ -n "$$DIADEMA_EXTRA_SAN" ]; then
+          for name in $$(echo "$$DIADEMA_EXTRA_SAN" | tr ',' ' '); do
+            SAN="$$SAN,DNS:$$name"
+          done
+        fi
+        echo "Genero certificato server (SAN: $$SAN)..."
         openssl req -newkey rsa:4096 -nodes -keyout server.key -out server.csr \
           -subj "/O=DIADEMA/CN=$$DIADEMA_PUBLIC_HOST"
         cat > san.cnf <<EOF
-        subjectAltName=DNS:nginx,DNS:localhost,DNS:$$DIADEMA_PUBLIC_HOST,IP:127.0.0.1
+        subjectAltName=$$SAN
         EOF
         openssl x509 -req -in server.csr -CA ca.crt -CAkey ca.key -CAcreateserial \
           -out server.crt -days 825 -extfile san.cnf
@@ -328,6 +453,8 @@ volumes:
     name: diadema-full-mongodb
   rabbitmq_data:
     name: diadema-full-rabbitmq
+  rabbitmq_certs:
+    name: diadema-full-rabbitmq-certs
   girder_data:
     name: diadema-full-girder-data
   girder_assetstore:

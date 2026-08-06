@@ -31,6 +31,31 @@ spec:
             # vedi README.md prerequisito 4). Aggiornare il tag ad ogni rebuild:
             # non c'è automazione CI che ripubblichi l'immagine ad ogni commit.
             image: ghcr.io/marver17/diadema-mriqc-worker:latest
+            # Comando esplicito (non solo "args": l'immagine ha ENTRYPOINT []
+            # vuoto, "args" da solo sostituirebbe l'intero CMD invece di
+            # completarlo — vedi nota sopra "resources"). Rispetto al CMD di
+            # default aggiunge --without-gossip/--mingle/--heartbeat: senza,
+            # celery prova a dichiarare l'exchange "reply.celery.pidbox" per
+            # il proprio protocollo di controllo tra worker, a cui l'utente
+            # RabbitMQ remoto (permessi ristretti a "diadema_mriqc", vedi
+            # REMOTE_WORKER_QUEUES_REGEX) non ha accesso per design — fallisce
+            # con "403 ACCESS_REFUSED" (verificato con un job reale sul
+            # cluster). Non necessario qui: un solo worker, nessun peer con
+            # cui fare gossip/mingle.
+            command:
+              - celery
+              - -A
+              - girder_worker.app
+              - worker
+              - --queues=diadema_mriqc
+              - --loglevel=info
+              - --pool=solo
+              - --concurrency=1
+              - --heartbeat-interval=0
+              - --include=girder_diadema_pipeline.tasks
+              - --without-gossip
+              - --without-mingle
+              - --without-heartbeat
             envFrom:
               - secretRef:
                   name: diadema-remote-rabbitmq
@@ -49,20 +74,24 @@ spec:
                 value: "0"
               - name: CELERY_WORKER_CANCEL_LONG_RUNNING_TASKS_ON_CONNECTION_LOSS
                 value: "true"
-            args:
-              - "--queues=diadema_mriqc"
-              # Un job per pod: niente concurrency interna da gestire, lo
-              # scaling orizzontale lo fa KEDA creando più Job.
-              - "--concurrency=1"
+            # Nessun "args" qui: il CMD dell'immagine (Dockerfile) include già
+            # --queues=diadema_mriqc e --concurrency=1. L'immagine ha
+            # ENTRYPOINT [] (vuoto) — un "args" qui sostituirebbe l'intero CMD
+            # invece di completarlo, e Kubernetes proverebbe a eseguire il
+            # primo elemento come binario (visto in test: "exec: \"--queues=...\":
+            # executable file not found in $PATH").
             resources:
-              # Calibrare sui valori realmente osservati per MRIQC prima di
-              # andare in produzione: placeholder prudenziali.
+              # Valori aggiornati dopo un test reale su un T1w di dimensioni
+              # cliniche tipiche: con limit=8Gi il pod è stato OOMKilled a
+              # metà elaborazione MRIQC. 16Gi limit copre quel caso con
+              # margine; ricalibrare ulteriormente se serve in base al
+              # dataset reale (dimensioni/risoluzione dei volumi).
               requests:
                 cpu: "2"
-                memory: "4Gi"
+                memory: "6Gi"
               limits:
                 cpu: "4"
-                memory: "8Gi"
+                memory: "16Gi"
             volumeMounts:
               - name: ca-bundle
                 mountPath: /etc/diadema/certs
@@ -87,6 +116,10 @@ spec:
         # come MRIQC, dove non ha senso accumulare più messaggi per pod.
         mode: QueueLength
         value: "1"
+        # Anche lo scaler KEDA (non solo il worker) si connette in AMQPS al
+        # broker attraverso il tunnel: senza "tls: enable" verifica comunque
+        # TLS ma senza la CA interna, fallendo con x509 unknown authority.
+        tls: enable
       authenticationRef:
         name: diadema-remote-rabbitmq-trigger-auth
 ---
@@ -100,3 +133,9 @@ spec:
     - parameter: host
       name: diadema-remote-rabbitmq
       key: CELERY_BROKER_URL
+    # CA interna DIADEMA: necessaria allo scaler KEDA per verificare il
+    # certificato server AMQPS attraverso il tunnel (stessa CA usata dal
+    # worker via REQUESTS_CA_BUNDLE, vedi secret diadema-remote-ca).
+    - parameter: ca
+      name: diadema-remote-ca
+      key: ca.crt

@@ -1,11 +1,17 @@
 # Worker DIADEMA su cluster Kubernetes remoto
 
-Manifest per eseguire il worker MRIQC (pattern replicabile per FreeSurfer/LST-AI) su un
+Manifest per eseguire i worker MRIQC e FreeSurfer (`scaledjob-mriqc.yaml`,
+`scaledjob-freesurfer.yaml` — pattern replicabile anche per LST-AI) su un
 cluster Kubernetes ospitato in un'altra struttura, raggiungendo RabbitMQ e Girder della sede
 principale solo attraverso un tunnel WireGuard **punto-punto**: un gateway in-cluster
 (`wireguard-gateway.yaml`) e uno speculare lato Girder (`deploy/full/docker-compose.yml`,
 servizio `wireguard-gateway`) — nessun servizio di gestione (RabbitMQ/Mongo) esposto
-direttamente, solo AMQPS/HTTPS inoltrati esplicitamente attraverso il tunnel.
+direttamente, solo AMQPS/HTTPS inoltrati esplicitamente attraverso il tunnel. I due
+`ScaledJob` condividono la stessa `TriggerAuthentication` (`diadema-remote-rabbitmq-trigger-auth`,
+definita in `scaledjob-mriqc.yaml`) e lo stesso secret `diadema-remote-rabbitmq`: l'utente
+RabbitMQ `remote-worker` ha permessi ristretti via `REMOTE_WORKER_QUEUES_REGEX`
+(`deploy/full/.env`) alle sole code effettivamente offloadate — va tenuto allineato
+quando si aggiunge un nuovo `ScaledJob` per un'altra pipeline.
 
 > Per il log passo-passo di un collegamento reale già testato (comandi eseguiti, bug incontrati
 > e risolti, risultati dei test di handshake/canale/isolamento) vedi
@@ -47,13 +53,13 @@ private restano ciascuna sul proprio lato, mai committate né trasferite insieme
    helm repo add kedacore https://kedacore.github.io/charts
    helm install keda kedacore/keda -n keda --create-namespace
    ```
-4. **Registry immagini: GitHub Container Registry.** L'immagine `diadema-mriqc-worker` è
-   pubblicata (push manuale, non c'è ancora automazione CI) su
-   `ghcr.io/marver17/diadema-mriqc-worker:latest` — pacchetto **privato**. Chi ricostruisce il
-   worker deve ripetere il push manualmente (`docker build` con lo stesso `Dockerfile` usato da
-   `deploy/full/docker-compose.yml`, poi `docker push`) e tenere allineato il tag in
-   `scaledjob-mriqc.yaml`. Creare poi l'`imagePullSecret` sul cluster remoto con un PAT proprio
-   (scope `read:packages`):
+4. **Registry immagini: GitHub Container Registry.** Le immagini `diadema-mriqc-worker` e
+   `diadema-freesurfer-worker` sono pubblicate (push manuale, non c'è ancora automazione CI) su
+   `ghcr.io/marver17/diadema-{mriqc,freesurfer}-worker:latest` — pacchetti **privati**. Chi
+   ricostruisce un worker deve ripetere il push manualmente (`docker build` con lo stesso
+   `Dockerfile` usato da `deploy/full/docker-compose.yml`, poi `docker push`) e tenere allineato
+   il tag nel relativo `scaledjob-*.yaml`. Creare poi l'`imagePullSecret` sul cluster remoto con
+   un PAT proprio (scope `read:packages`), riusato da entrambi i `ScaledJob`:
    ```bash
    kubectl -n diadema-remote create secret docker-registry ghcr-pull-secret \
      --docker-server=ghcr.io --docker-username=<user> --docker-password=<PAT con read:packages>
@@ -88,6 +94,15 @@ kubectl -n diadema-remote create secret generic diadema-remote-ca \
 
 kubectl apply -f networkpolicy.yaml
 kubectl apply -f scaledjob-mriqc.yaml
+
+# Solo se si offloada anche FreeSurfer: secret licenza dedicato (multi-riga,
+# non passabile come env var) e il suo ScaledJob. Prima aggiungere
+# "freesurfer" a REMOTE_WORKER_QUEUES_REGEX (deploy/full/.env) e rieseguire
+# init-rabbitmq-remote, altrimenti l'utente RabbitMQ ristretto non ha
+# accesso alla coda "freesurfer" (stesso principio di isolamento di MRIQC).
+kubectl -n diadema-remote create secret generic diadema-remote-freesurfer-license \
+  --from-file=license.txt=./freesurfer_license.txt
+kubectl apply -f scaledjob-freesurfer.yaml
 ```
 
 ## 4. Verifica

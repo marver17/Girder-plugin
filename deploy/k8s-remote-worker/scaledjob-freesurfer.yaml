@@ -1,0 +1,128 @@
+# ScaledJob KEDA: crea un Job Kubernetes per ogni messaggio in coda su
+# "freesurfer" (fino a maxReplicaCount job paralleli), stesso pattern di
+# scaledjob-mriqc.yaml — vedi quel file per i commenti di dettaglio sui bug
+# già risolti (ENTRYPOINT[]/args, pidbox gossip/mingle, TLS letto solo da
+# TriggerAuthentication, worker che si arresta da solo dopo un task).
+# Riusa la TriggerAuthentication "diadema-remote-rabbitmq-trigger-auth"
+# già definita in scaledjob-mriqc.yaml (stesso broker, stessa CA, stesso
+# TLS) — non ridichiarata qui per evitare due sorgenti dello stesso oggetto.
+apiVersion: keda.sh/v1alpha1
+kind: ScaledJob
+metadata:
+  name: diadema-freesurfer-worker-remote
+  namespace: diadema-remote
+spec:
+  jobTargetRef:
+    parallelism: 1
+    completions: 1
+    # Backstop statico generoso, NON legato dinamicamente al parametro
+    # per-richiesta fsTimeout: quel timeout applicativo è già gestito da
+    # Celery (rest.py:_tool_soft_time_limit → soft_time_limit/time_limit,
+    # sincronizzato per-richiesta ad ogni apply_async, indipendente dal
+    # deadline k8s). KEDA ScaledJob non supporta template per-messaggio,
+    # quindi non può leggere fsTimeout dal contenuto del messaggio per
+    # generare un deadline diverso ogni volta — questo valore protegge
+    # solo il caso raro in cui Celery stesso si blocchi senza applicare il
+    # proprio timeout. fsTimeout default 14400s (4h) + margine Celery
+    # (_CELERY_TIMEOUT_MARGIN_S=300) + margine per pull immagine/overhead
+    # pod.
+    activeDeadlineSeconds: 16200
+    backoffLimit: 0
+    template:
+      metadata:
+        labels:
+          app: diadema-freesurfer-worker-remote
+      spec:
+        priorityClassName: diadema-remote-batch
+        restartPolicy: Never
+        imagePullSecrets:
+          - name: ghcr-pull-secret
+        containers:
+          - name: diadema-freesurfer-worker
+            # Pubblicata su ghcr.io/marver17/diadema-freesurfer-worker (push
+            # manuale, stesso flusso di diadema-mriqc-worker). Aggiornare il
+            # tag ad ogni rebuild.
+            image: ghcr.io/marver17/diadema-freesurfer-worker:latest
+            command:
+              - celery
+              - -A
+              - girder_worker.app
+              - worker
+              - --queues=freesurfer
+              - --loglevel=info
+              - --pool=solo
+              - --concurrency=1
+              - --heartbeat-interval=0
+              - --include=girder_diadema_pipeline.tasks
+              - --without-gossip
+              - --without-mingle
+              - --without-heartbeat
+            envFrom:
+              - secretRef:
+                  name: diadema-remote-rabbitmq
+            env:
+              - name: C_FORCE_ROOT
+                value: "1"
+              - name: GIRDER_API_URL
+                value: "https://wireguard-gateway.diadema-remote.svc.cluster.local/api/v1"
+              - name: REQUESTS_CA_BUNDLE
+                value: /etc/diadema/certs/ca.crt
+              - name: FS_LICENSE
+                value: /usr/local/freesurfer/license.txt
+              - name: DIADEMA_SUBJECTS_DIR
+                value: /data/diadema/subjects
+              - name: CELERY_BROKER_HEARTBEAT
+                value: "0"
+              - name: CELERY_WORKER_CANCEL_LONG_RUNNING_TASKS_ON_CONNECTION_LOSS
+                value: "true"
+              - name: DIADEMA_WORKER_MAX_TASKS
+                value: "1"
+            # Nessun "args" qui, stesso motivo di scaledjob-mriqc.yaml:
+            # l'immagine ha ENTRYPOINT [] vuoto, "command" completa il CMD
+            # invece di sostituirlo.
+            resources:
+              # Nessun valore di riferimento diretto dal worker locale
+              # (deploy/full/docker-compose.yml non impone limiti). recon-all
+              # è più CPU/memory-hungry di MRIQC (raccomandazione upstream
+              # ≥8GB) e qui gira con openmp_threads=4 di default: partenza
+              # prudente, da validare/calibrare dopo il primo run reale
+              # (stesso approccio già usato per MRIQC dopo l'OOMKill a 8Gi).
+              requests:
+                cpu: "4"
+                memory: "8Gi"
+              limits:
+                cpu: "6"
+                memory: "32Gi"
+            volumeMounts:
+              - name: ca-bundle
+                mountPath: /etc/diadema/certs
+                readOnly: true
+              - name: fs-license
+                mountPath: /usr/local/freesurfer/license.txt
+                subPath: license.txt
+                readOnly: true
+              - name: subjects-dir
+                mountPath: /data/diadema/subjects
+        volumes:
+          - name: ca-bundle
+            secret:
+              secretName: diadema-remote-ca
+          - name: fs-license
+            secret:
+              secretName: diadema-remote-freesurfer-license
+          - name: subjects-dir
+            emptyDir: {}
+  pollingInterval: 15
+  maxReplicaCount: 5
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 5
+  triggers:
+    - type: rabbitmq
+      metadata:
+        queueName: freesurfer
+        mode: QueueLength
+        value: "1"
+        # NON "tls: enable" qui — vedi commento in scaledjob-mriqc.yaml:
+        # va nella TriggerAuthentication condivisa, referenziata sotto.
+      authenticationRef:
+        name: diadema-remote-rabbitmq-trigger-auth

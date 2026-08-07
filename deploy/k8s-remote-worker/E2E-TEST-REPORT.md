@@ -123,33 +123,54 @@ via REST. `item.diadema.mriqc.status = "completed"`.
 
 ## Problematiche ancora aperte (da risolvere)
 
-1. **Bug/limite dello scaler KEDA RabbitMQ con TLS** (non risolto, aggirato).
-   Con `tls: enable` + CA passata via `TriggerAuthentication` (parametro
-   `ca`, verificato essere il nome corretto analizzando il binario di
-   `keda-operator:2.20.2`), lo scaler continua a fallire con `x509:
-   certificate signed by unknown authority` — anche con `unsafeSsl: true`,
-   che avrebbe dovuto disabilitare la verifica. La CA/catena TLS è stata
-   verificata manualmente corretta (`openssl s_client` dallo stesso
-   namespace, handshake OK). **Il test end-to-end di questa sessione ha
-   bypassato KEDA usando un `Job` Kubernetes manuale** (stesso pod template)
-   invece dello `ScaledJob` — quindi lo scaling automatico basato sulla
-   profondità di coda **non è ancora verificato funzionante**. Serve capire
-   se è un bug noto di KEDA 2.20.2 (verificare changelog/issue tracker) o un
-   problema di configurazione più sottile prima di affidarsi allo
-   `ScaledJob` in produzione.
-2. **`amq.default` ACCESS_REFUSED nei log dopo un task completato con
-   successo** (non bloccante, ma da capire). Anche col job riuscito
-   correttamente (metriche + upload OK), il worker logga
-   `amqp.exceptions.AccessRefused: Basic.publish: (403) ACCESS_REFUSED -
-   write access to exchange 'amq.default'`. Sospetto: un meccanismo interno
-   di Celery (risposta/stato) che ignora parzialmente `task_ignore_result` o
-   `worker_enable_remote_control=False`. Il campo `job.status` in MongoDB
-   resta a `2` (RUNNING) anche a job applicativamente concluso
-   (`item.diadema.mriqc.status = "completed"`) — probabile conseguenza dello
-   stesso problema: l'aggiornamento finale dello stato job Celery/Girder non
-   completa. Da investigare prima di fare affidamento sullo stato "job" di
-   Girder per i worker remoti (l'endpoint `cleanup_stuck_jobs` menzionato in
-   `rest.py` potrebbe già essere pensato per mitigare proprio questo).
+1. **RISOLTO il 2026-08-07.** Bug dello scaler KEDA RabbitMQ con TLS, causa
+   isolata leggendo il sorgente di KEDA v2.20.2
+   (`pkg/scalers/rabbitmq_scaler.go`): il campo `EnableTLS` ha tag
+   `keda:"name=tls, order=authParams"` — letto **solo** da
+   `TriggerAuthentication`, mai dal `metadata:` del trigger nello
+   `ScaledJob`, dove l'avevamo messo (`tls: enable`) senza alcun effetto
+   (nessun errore di validazione, silenziosamente ignorato). Con
+   `EnableTLS` sempre `"disable"` lato KEDA, `buildAMQPConfig` non costruiva
+   mai un `tls.Config` con la CA interna — ma la libreria AMQP tentava
+   comunque TLS per via dello schema `amqps://` nell'URL, usando il pool di
+   CA di sistema (che non conosce la CA interna DIADEMA): da qui `x509:
+   certificate signed by unknown authority` anche con la CA giusta
+   configurata altrove. Fix: valore `TLS: "enable"` spostato dentro il
+   secret `diadema-remote-rabbitmq`, referenziato da un nuovo
+   `secretTargetRef` (`parameter: tls`) in `TriggerAuthentication` — vedi
+   `scaledjob-mriqc.yaml`, `secret.example.yaml`, `README.md`. Verificato
+   live sul cluster `concord`: dopo il fix `READY: True` sullo `ScaledJob` e
+   un Job MRIQC reale sottomesso da Girder ha fatto scattare KEDA da solo
+   (nessun `Job` k8s manuale), creando il pod, elaborando ed arrivando a
+   `job.status = 3` (SUCCESS) in Girder senza intervento manuale — lo
+   scaling automatico è ora verificato funzionante end-to-end. Nota a
+   parte: lo `ScaledJob` applicato sul cluster era rimasto alla versione con
+   il bug `args:`/`ENTRYPOINT []` (punto già "risolto" nel repo ma mai
+   ri-applicato al cluster con `kubectl apply` dopo il fix) — vale la pena
+   ricontrollare periodicamente che i manifest live non siano andati alla
+   deriva rispetto al repo.
+2. **RISOLTO il 2026-08-07.** `job.status` in MongoDB bloccato a `2`
+   (RUNNING) anche a job applicativamente concluso. Causa isolata leggendo
+   il sorgente `girder_worker` installato nel worker: il signal handler
+   `gw_task_success` (in `girder_worker.app`) chiama `is_revoked(sender)`
+   per distinguere un completamento normale da una cancellazione, PRIMA di
+   impostare lo stato SUCCESS del Job. `is_revoked` usa
+   `app.control.inspect()` di Celery, che richiede l'exchange
+   `reply.celery.pidbox` — non concesso all'utente RabbitMQ remoto
+   (permessi ristretti alla sola coda offloadata, per design). L'eccezione
+   `AccessRefused` risultante non è né `AttributeError` né
+   `StateTransitionException`: `gw_task_success` non la cattura, quindi la
+   PUT che chiude il Job non partiva mai. `gw_task_failure` non ha questo
+   problema (non chiama `is_revoked`), infatti i job falliti transitavano
+   correttamente a ERROR — solo il percorso di successo era bloccato. Il
+   sintomo `amq.default ACCESS_REFUSED` osservato in questa sessione era un
+   problema **distinto e concorrente** (risolto anch'esso: result backend
+   `rpc://` → `cache+memory://`, vedi commit `52b0551`/`4a0965a` su
+   `diadema-plugin-hardening`), non la causa dello stato bloccato. Fix in
+   `worker_entry.py`: sovrascritto l'attributo `is_revoked` sul modulo
+   `girder_worker.app` con una versione che tratta un fallimento del
+   controllo remoto come "non revocato" invece di propagare l'eccezione.
+   Verificato con un job MRIQC reale: `job.status` arriva a `3` (SUCCESS).
 3. **Risorse CPU/memoria da ricalibrare su un campione più ampio.** Il
    valore attuale (16Gi limit) è stato validato su **un solo** file reale.
    Andrebbe ripetuto su alcuni dataset rappresentativi (dimensioni/

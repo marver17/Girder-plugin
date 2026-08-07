@@ -116,10 +116,19 @@ spec:
         # come MRIQC, dove non ha senso accumulare più messaggi per pod.
         mode: QueueLength
         value: "1"
-        # Anche lo scaler KEDA (non solo il worker) si connette in AMQPS al
-        # broker attraverso il tunnel: senza "tls: enable" verifica comunque
-        # TLS ma senza la CA interna, fallendo con x509 unknown authority.
-        tls: enable
+        # NON "tls: enable" qui: il campo EnableTLS dello scaler RabbitMQ di
+        # KEDA (rabbitmq_scaler.go, tag `order=authParams`) viene letto SOLO
+        # da TriggerAuthentication, mai dal metadata del trigger — un valore
+        # messo qui viene silenziosamente ignorato (resta "disable" lato
+        # KEDA). Con EnableTLS="disable" nessun tls.Config con la CA interna
+        # viene costruito, ma la libreria AMQP tenta comunque TLS perché
+        # l'URL è "amqps://", usando il pool di CA di sistema — che non
+        # conosce la nostra CA interna: da qui "x509: certificate signed by
+        # unknown authority" anche con la CA giusta configurata (verificato
+        # analizzando il sorgente KEDA v2.20.2 e confermato live sul
+        # cluster). Il valore va invece nella chiave "TLS" del secret
+        # diadema-remote-rabbitmq, referenziata da TriggerAuthentication
+        # sotto (parameter: tls) — vedi anche ca/cert/key, stesso pattern.
       authenticationRef:
         name: diadema-remote-rabbitmq-trigger-auth
 ---
@@ -139,3 +148,8 @@ spec:
     - parameter: ca
       name: diadema-remote-ca
       key: ca.crt
+    # Letto da EnableTLS (order=authParams, vedi commento nel trigger sopra):
+    # deve stare qui, non nel metadata del trigger.
+    - parameter: tls
+      name: diadema-remote-rabbitmq
+      key: TLS

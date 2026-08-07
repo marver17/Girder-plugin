@@ -64,6 +64,7 @@ _ENV_LSTAI_OUTPUT_DIR = "DIADEMA_LSTAI_OUTPUT_DIR"
     bind=True,
     acks_late=True,
     reject_on_worker_lost=True,
+    ignore_result=True,
     name="girder_diadema_pipeline.tasks.run_lstai_task",
 )
 def run_lstai_task(task, **kwargs):

@@ -18,7 +18,10 @@ services:
     network_mode: host
     environment:
       CELERY_BROKER_URL: "amqps://${REMOTE_WORKER_USER}:${REMOTE_WORKER_PASS}@127.0.0.1:${RABBITMQ_AMQPS_PORT:-5671}//"
-      CELERY_RESULT_BACKEND: "rpc://"
+      # "rpc://" richiede diritti sull'exchange "amq.default", negati
+      # all'utente RabbitMQ ristretto: causava AccessRefused e Job Girder
+      # bloccato a RUNNING (vedi commento in ../secret.example.yaml).
+      CELERY_RESULT_BACKEND: "cache+memory://"
       CELERY_BROKER_HEARTBEAT: "0"
       CELERY_WORKER_CANCEL_LONG_RUNNING_TASKS_ON_CONNECTION_LOSS: "true"
       C_FORCE_ROOT: "1"

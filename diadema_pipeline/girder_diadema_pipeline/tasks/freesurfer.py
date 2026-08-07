@@ -203,6 +203,7 @@ def _collect_stats(subject_dir):
     bind=True,
     acks_late=True,
     reject_on_worker_lost=True,
+    ignore_result=True,
     name="girder_diadema_pipeline.tasks.upload_freesurfer_results",
 )
 def upload_freesurfer_results(task, **kwargs):
@@ -259,117 +260,137 @@ def upload_freesurfer_results(task, **kwargs):
     bids_anchor_id = item_id if not is_session else None
 
     progress = make_safe_progress(task, TASK_NAME)
-    progress(
-        "Upload risultati FreeSurfer su Girder (BIDS derivatives)...",
-        total=100,
-        current=5,
-    )
 
-    subject_dir = Path(subject_dir_str)
-    uploaded = []
-    derivative_item_ids = []
-
-    # Log completo recon-all → derivatives/freesurfer/sub-xxx/
-    log_file = subject_dir / "scripts" / "recon-all.log"
-    if log_file.exists():
-        iid = bids_upload_derivative(
-            gc,
-            bids_anchor_id,
-            log_file,
-            datatype="anat",
-            participant_label=participant_label,
-            derivatives_root_id=derivatives_root_id,
-            derivatives_root_type=derivatives_root_type,
-            pipeline_name="freesurfer",
+    try:
+        progress(
+            "Upload risultati FreeSurfer su Girder (BIDS derivatives)...",
+            total=100,
+            current=5,
         )
-        uploaded.append("recon-all.log")
-        if iid:
-            derivative_item_ids.append(iid)
-        progress("Log recon-all caricato.", current=30)
 
-    # File *.stats
-    stats_path = subject_dir / "stats"
-    if stats_path.exists():
-        stat_files = sorted(stats_path.glob("*.stats"))
-        for i, sf in enumerate(stat_files):
+        subject_dir = Path(subject_dir_str)
+        uploaded = []
+        derivative_item_ids = []
+
+        # Log completo recon-all → derivatives/freesurfer/sub-xxx/
+        log_file = subject_dir / "scripts" / "recon-all.log"
+        if log_file.exists():
             iid = bids_upload_derivative(
                 gc,
                 bids_anchor_id,
-                sf,
+                log_file,
                 datatype="anat",
                 participant_label=participant_label,
                 derivatives_root_id=derivatives_root_id,
+                derivatives_root_type=derivatives_root_type,
                 pipeline_name="freesurfer",
             )
-            uploaded.append(sf.name)
+            uploaded.append("recon-all.log")
             if iid:
                 derivative_item_ids.append(iid)
-            pct = 30 + int((i + 1) / max(len(stat_files), 1) * 40)
-            progress(f"Caricato {sf.name}", current=pct)
+            progress("Log recon-all caricato.", current=30)
 
-    # JSON statistiche (serializza il dict già parsato)
-    with tempfile.NamedTemporaryFile(
-        suffix="_freesurfer_stats.json", delete=False, mode="w"
-    ) as tmp:
-        json.dump(stats, tmp, indent=2)
-        tmp_path = Path(tmp.name)
-    try:
-        iid = bids_upload_derivative(
-            gc,
-            bids_anchor_id,
-            tmp_path,
-            datatype="anat",
-            participant_label=participant_label,
-            derivatives_root_id=derivatives_root_id,
-            derivatives_root_type=derivatives_root_type,
-            pipeline_name="freesurfer",
-        )
-        uploaded.append("freesurfer_stats.json")
-        if iid:
-            derivative_item_ids.append(iid)
-    finally:
-        tmp_path.unlink(missing_ok=True)
+        # File *.stats
+        stats_path = subject_dir / "stats"
+        if stats_path.exists():
+            stat_files = sorted(stats_path.glob("*.stats"))
+            for i, sf in enumerate(stat_files):
+                iid = bids_upload_derivative(
+                    gc,
+                    bids_anchor_id,
+                    sf,
+                    datatype="anat",
+                    participant_label=participant_label,
+                    derivatives_root_id=derivatives_root_id,
+                    pipeline_name="freesurfer",
+                )
+                uploaded.append(sf.name)
+                if iid:
+                    derivative_item_ids.append(iid)
+                pct = 30 + int((i + 1) / max(len(stat_files), 1) * 40)
+                progress(f"Caricato {sf.name}", current=pct)
 
-    progress("Aggiornamento metadati...", current=90)
-
-    full_results = {
-        **result_meta,
-        "stats": stats,
-        "files_uploaded": uploaded,
-        "derivative_item_ids": derivative_item_ids,
-    }
-
-    _update_result(results=full_results, status="completed")
-
-    # Aggiorna anche l'item NIfTI T1w in modo che il widget NIfTI viewer
-    # possa mostrare i risultati FreeSurfer per quel file specifico
-    if is_session:
-        t1w_file_id = result_meta.get("file_id") or kwargs.get("t1w_file_id")
-        if not t1w_file_id and "session_folder_id" in result_meta:
-            # Cerca il T1w dalla sessione per trovare l'item
-            try:
-                t1w_item = bids_find_modality_file(gc, result_meta["session_folder_id"], "T1w")
-                if t1w_item:
-                    update_diadema_tool(
-                        gc, str(t1w_item["_id"]), "freesurfer",
-                        status="completed",
-                        results=full_results,
-                    )
-            except Exception as _e:
-                logger.warning("[%s] update item T1w non-fatal: %s", TASK_NAME, _e)
-
-    # Pulizia directory soggetto (opzionale)
-    if not keep_subjects_dir:
-        import shutil
-
+        # JSON statistiche (serializza il dict già parsato)
+        with tempfile.NamedTemporaryFile(
+            suffix="_freesurfer_stats.json", delete=False, mode="w"
+        ) as tmp:
+            json.dump(stats, tmp, indent=2)
+            tmp_path = Path(tmp.name)
         try:
-            shutil.rmtree(subject_dir, ignore_errors=True)
-            progress("Cartella soggetto rimossa.", current=98)
-        except Exception as _rm_e:
-            logger.warning("[%s] pulizia subjects dir non-fatal: %s", TASK_NAME, _rm_e)
+            iid = bids_upload_derivative(
+                gc,
+                bids_anchor_id,
+                tmp_path,
+                datatype="anat",
+                participant_label=participant_label,
+                derivatives_root_id=derivatives_root_id,
+                derivatives_root_type=derivatives_root_type,
+                pipeline_name="freesurfer",
+            )
+            uploaded.append("freesurfer_stats.json")
+            if iid:
+                derivative_item_ids.append(iid)
+        finally:
+            tmp_path.unlink(missing_ok=True)
 
-    progress("Upload FreeSurfer completato!", current=100)
-    return {"status": "success", "files_uploaded": uploaded}
+        progress("Aggiornamento metadati...", current=90)
+
+        full_results = {
+            **result_meta,
+            "stats": stats,
+            "files_uploaded": uploaded,
+            "derivative_item_ids": derivative_item_ids,
+        }
+
+        _update_result(results=full_results, status="completed")
+
+        # Aggiorna anche l'item NIfTI T1w in modo che il widget NIfTI viewer
+        # possa mostrare i risultati FreeSurfer per quel file specifico
+        if is_session:
+            t1w_file_id = result_meta.get("file_id") or kwargs.get("t1w_file_id")
+            if not t1w_file_id and "session_folder_id" in result_meta:
+                # Cerca il T1w dalla sessione per trovare l'item
+                try:
+                    t1w_item = bids_find_modality_file(gc, result_meta["session_folder_id"], "T1w")
+                    if t1w_item:
+                        update_diadema_tool(
+                            gc, str(t1w_item["_id"]), "freesurfer",
+                            status="completed",
+                            results=full_results,
+                        )
+                except Exception as _e:
+                    logger.warning("[%s] update item T1w non-fatal: %s", TASK_NAME, _e)
+
+        # Pulizia directory soggetto (opzionale)
+        if not keep_subjects_dir:
+            import shutil
+
+            try:
+                shutil.rmtree(subject_dir, ignore_errors=True)
+                progress("Cartella soggetto rimossa.", current=98)
+            except Exception as _rm_e:
+                logger.warning("[%s] pulizia subjects dir non-fatal: %s", TASK_NAME, _rm_e)
+
+        progress("Upload FreeSurfer completato!", current=100)
+        return {"status": "success", "files_uploaded": uploaded}
+
+    except Exception as exc:
+        # Senza questo except, qualunque errore qui lasciava
+        # diadema.freesurfer.status bloccato per sempre a "uploading"
+        # (stato non terminale scritto da run_freesurfer_task prima di
+        # dispatchare questo sub-task) — mai visibile come errore.
+        logger.error("[%s] upload fallito: %s", TASK_NAME, exc)
+        try:
+            _update_result(
+                status="error",
+                error={"message": str(exc), "timestamp": now_iso()},
+            )
+        except Exception as _report_exc:
+            logger.error(
+                "[%s] impossibile scrivere status=error dopo fallimento upload: %s",
+                TASK_NAME, _report_exc,
+            )
+        raise
 
 
 # ── Task principale ───────────────────────────────────────────────────────────
@@ -380,6 +401,7 @@ def upload_freesurfer_results(task, **kwargs):
     bind=True,
     acks_late=True,
     reject_on_worker_lost=True,
+    ignore_result=True,
     name="girder_diadema_pipeline.tasks.run_freesurfer_task",
 )
 def run_freesurfer_task(task, **kwargs):

@@ -60,18 +60,31 @@ events.on('g:hierarchy.route', function ({ route }) {
     if (_sessionMountInFlight) return;
     _sessionMountInFlight = true;
 
-    // Risale la gerarchia (max 2 livelli) finché non trova ses-XX / sub-XX.
+    // Risale la gerarchia (max 2 livelli) finché non trova ses-XX / sub-XX,
+    // poi verifica che la sessione contenga davvero almeno un item NIfTI
+    // (il nome cartella da solo non basta: una ses-XX vuota o senza dati
+    // BIDS non deve mostrare il pannello, altrimenti "Run" appare senza
+    // nulla su cui girare).
     _findSessionAncestor(folderId)
         .then(({ sessionId, sessionName }) => {
-            _sessionMountInFlight = false;
-            const existing = $('.g-diadema-panel[data-diadema-mode="session"]');
-            if (sessionId) {
-                if (existing.data('diadema-id') === sessionId) return;
-                existing.remove();
-                DiademaPanel.mountPanelByIdAndName(sessionId, sessionName);
-            } else {
-                existing.remove();
+            if (!sessionId) {
+                _sessionMountInFlight = false;
+                $('.g-diadema-panel[data-diadema-mode="session"]').remove();
+                return;
             }
+            DiademaPanel._folderHasNiftiItems(sessionId)
+                .then(hasNifti => {
+                    _sessionMountInFlight = false;
+                    const existing = $('.g-diadema-panel[data-diadema-mode="session"]');
+                    if (hasNifti) {
+                        if (existing.data('diadema-id') === sessionId) return;
+                        existing.remove();
+                        DiademaPanel.mountPanelByIdAndName(sessionId, sessionName);
+                    } else {
+                        existing.remove();
+                    }
+                })
+                .catch(() => { _sessionMountInFlight = false; });
         })
         .catch(() => { _sessionMountInFlight = false; });
 });

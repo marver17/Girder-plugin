@@ -73,6 +73,7 @@ _ENV_MRIQC_OUTPUT_DIR = "DIADEMA_MRIQC_OUTPUT_DIR"
     bind=True,
     acks_late=True,
     reject_on_worker_lost=True,
+    ignore_result=True,
     name="girder_diadema_pipeline.tasks.run_mriqc_task",
 )
 def run_mriqc_task(task, **kwargs):

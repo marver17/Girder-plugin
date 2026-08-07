@@ -151,6 +151,117 @@ def _worker_callback_url() -> str:
     return url
 
 
+# ── Propagazione bidirezionale stato item ↔ sessione BIDS ────────────────────
+# item.diadema.<tool> e folder.diadema.<tool> sono documenti Mongo indipendenti:
+# senza questo collegamento, avviare un tool su un item non si riflette mai sul
+# pannello sessione (e viceversa), lasciando i due punti di vista disallineati.
+
+_SESSION_FOLDER_NAME_RE = re.compile(r"^ses[-_][a-zA-Z0-9]+$", re.IGNORECASE)
+# Stati terminali gestiti puntualmente dai task (risultati per-item specifici,
+# es. metriche MRIQC per modalità): un fan-out generico li sovrascriverebbe
+# con un risultato di sessione privo di dettaglio, quindi non li propaghiamo qui.
+_NON_FANOUT_STATUSES = ("completed",)
+
+
+def _find_ancestor_session_folder(start_folder_id, max_levels=8):
+    """Risale da una cartella fino all'antenato 'ses-XX' più vicino, o None."""
+    fid = start_folder_id
+    for _ in range(max_levels):
+        if not fid:
+            return None
+        folder = Folder().load(fid, force=True, exc=False)
+        if not folder:
+            return None
+        if _SESSION_FOLDER_NAME_RE.match(folder.get("name") or ""):
+            return folder
+        if folder.get("parentCollection", "folder") != "folder":
+            return None
+        fid = folder.get("parentId")
+    return None
+
+
+def _is_nifti_item(item):
+    name = (item.get("name") or "").lower()
+    if name.endswith(".nii.gz") or name.endswith(".nii"):
+        return True
+    files = list(Item().childFiles(item, limit=5))
+    return any((f.get("name") or "").lower().endswith((".nii.gz", ".nii")) for f in files)
+
+
+def _list_session_nifti_items(session_folder):
+    """Elenca ricorsivamente gli item NIfTI dentro una cartella sessione BIDS."""
+    items = []
+
+    def _collect(folder):
+        for item in Item().find({"folderId": folder["_id"]}):
+            if _is_nifti_item(item):
+                items.append(item)
+        for sub in Folder().find({"parentId": folder["_id"], "parentCollection": "folder"}):
+            _collect(sub)
+
+    _collect(session_folder)
+    return items
+
+
+def _propagate_item_status_to_session(item, tool_id, data):
+    """Dopo un aggiornamento diadema a livello item, aggiorna l'aggregato sessione."""
+    if "status" not in data:
+        return
+    session_folder = _find_ancestor_session_folder(item.get("folderId"))
+    if not session_folder:
+        return
+    session_items = _list_session_nifti_items(session_folder)
+    if not session_items:
+        return
+
+    item_id_str = str(item["_id"])
+    statuses = []
+    for sitem in session_items:
+        if str(sitem["_id"]) == item_id_str:
+            statuses.append(data["status"])
+        else:
+            statuses.append(((sitem.get("diadema") or {}).get(tool_id) or {}).get("status"))
+
+    if any(s == "error" for s in statuses):
+        agg_status = "error"
+    elif any(s in _ACTIVE_STATUSES for s in statuses):
+        agg_status = next(s for s in statuses if s in _ACTIVE_STATUSES)
+    elif statuses and all(s == "completed" for s in statuses):
+        agg_status = "completed"
+    else:
+        # Stato non abbastanza significativo da propagare (es. misto/assente)
+        return
+
+    Folder().update(
+        {"_id": session_folder["_id"]},
+        {
+            "$set": {
+                f"diadema.{tool_id}.status": agg_status,
+                f"diadema.{tool_id}.items.{item_id_str}.status": data["status"],
+            }
+        },
+        multi=False,
+    )
+
+
+def _propagate_session_status_to_items(folder_id, tool_id, data):
+    """Dopo un aggiornamento diadema a livello sessione, propaga lo stato non
+    terminale agli item NIfTI figli (il completamento resta gestito dai task,
+    che scrivono risultati per-item più precisi)."""
+    status = data.get("status")
+    if not status or status in _NON_FANOUT_STATUSES:
+        return
+    folder = Folder().load(folder_id, force=True, exc=False)
+    if not folder:
+        return
+    for sitem in _list_session_nifti_items(folder):
+        Item().update(
+            {"_id": sitem["_id"]},
+            {"$set": {f"diadema.{tool_id}.status": status}},
+            multi=False,
+        )
+
+
 def _internal_api_url() -> str:
     """URL per le chiamate sincrone del server verso sé stesso.
 
@@ -960,6 +1071,13 @@ class DiademaResource(Resource):
             {"$set": {f"diadema.{toolId}.{k}": v for k, v in data.items()}},
             multi=False,
         )
+        try:
+            _propagate_item_status_to_session(item, toolId, data)
+        except Exception as exc:
+            logger.warning(
+                "[diadema] propagazione item→sessione fallita (item=%s tool=%s): %s",
+                item["_id"], toolId, exc,
+            )
         return {"updated": True, "tool": toolId, "fields": list(data.keys())}
 
     @access.admin
@@ -1321,6 +1439,13 @@ class DiademaResource(Resource):
             {"$set": {f"diadema.{toolId}.{k}": v for k, v in data.items()}},
             multi=False,
         )
+        try:
+            _propagate_session_status_to_items(oid, toolId, data)
+        except Exception as exc:
+            logger.warning(
+                "[diadema] propagazione sessione→item fallita (folder=%s tool=%s): %s",
+                oid, toolId, exc,
+            )
         return {"updated": True, "tool": toolId, "fields": list(data.keys())}
 
     @access.public(scope=TokenScope.DATA_READ)

@@ -800,6 +800,21 @@ const DiademaPanel = {
     },
 
     /**
+     * Verifica che una cartella (per id) contenga almeno un item NIfTI.
+     * Il nome 'ses-XX' da solo non garantisce che la sessione abbia dati:
+     * usa lo stesso endpoint già impiegato per il selettore file "Advanced".
+     * @returns {Promise<boolean>}
+     */
+    _folderHasNiftiItems(folderId) {
+        return restRequest({
+            method: 'GET',
+            url: `diadema_pipeline/session/${folderId}/files`,
+            error: null,
+        }).then(data => (data && data.files || []).length > 0)
+            .catch(() => false);
+    },
+
+    /**
      * Monta il pannello DIADEMA conoscendo solo id e nome della cartella
      * (usato da g:hierarchy.route dove non abbiamo il FolderModel completo).
      */
@@ -929,7 +944,10 @@ const DiademaPanel = {
         const folder = DiademaPanel._getViewModel(folderView);
         if (!folder) return;
         if (!DiademaPanel._isSessionFolder(folder)) return;
-        DiademaPanel.mountPanelForFolder(folder);
+        const folderId = folder.id || folder.get('_id');
+        DiademaPanel._folderHasNiftiItems(folderId).then(hasNifti => {
+            if (hasNifti) DiademaPanel.mountPanelForFolder(folder);
+        });
     },
 
     // ── Handler bottone Run ───────────────────────────────────────────────────

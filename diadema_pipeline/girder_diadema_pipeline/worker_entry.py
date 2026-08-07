@@ -165,12 +165,59 @@ def _apply_conf_overrides(app):
     # anche disattivare il tracking del risultato.
 
 
+def _setup_single_shot_shutdown():
+    """Se DIADEMA_WORKER_MAX_TASKS è impostata, il worker si arresta da solo
+    (SIGTERM, graceful/"warm shutdown") dopo aver processato quel numero di
+    task.
+
+    Necessario per i worker lanciati come Kubernetes Job (uno per messaggio
+    in coda via ScaledJob KEDA, completions=1): 'celery worker' di per sé
+    resta vivo indefinitamente in ascolto sulla coda anche a task finito, e
+    un Job k8s con completions=1 si aspetta invece che il container termini
+    da sé. Senza questo, il pod resta "Running" fino ad activeDeadlineSeconds
+    e il Job viene marcato Failed (DeadlineExceeded) anche a task riuscito —
+    uno spreco di risorse (pod idle per l'intero timeout) e un falso segnale
+    nel monitoring.
+
+    NON impostare questa variabile per i worker persistenti locali
+    (docker-compose dev/full/testing, restart: unless-stopped): quelli
+    devono restare long-running per design, in ascolto sulla stessa coda.
+    """
+    raw = os.environ.get("DIADEMA_WORKER_MAX_TASKS")
+    if not raw:
+        return
+    try:
+        max_tasks = int(raw)
+    except ValueError:
+        logger.warning("[diadema_pipeline] DIADEMA_WORKER_MAX_TASKS non valido: %s", raw)
+        return
+    if max_tasks <= 0:
+        return
+
+    import signal
+    from celery.signals import task_postrun
+
+    state = {"count": 0}
+
+    def _maybe_shutdown(**kwargs):
+        state["count"] += 1
+        if state["count"] >= max_tasks:
+            logger.info(
+                "[diadema_pipeline] %d/%d task processati, arresto il worker (SIGTERM graceful).",
+                state["count"], max_tasks,
+            )
+            os.kill(os.getpid(), signal.SIGTERM)
+
+    task_postrun.connect(_maybe_shutdown, weak=False)
+
+
 class DiademaWorkerPlugin:
     def __init__(self, girder_worker_app):
         from celery.signals import worker_init
 
         self.app = girder_worker_app
         _patch_gw_signals()
+        _setup_single_shot_shutdown()
 
         # girder_worker.app chiama discover_tasks(app) — che istanzia questo
         # plugin — PRIMA di app.config_from_object(..., force=True): scrivere

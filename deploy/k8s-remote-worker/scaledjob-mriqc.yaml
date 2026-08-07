@@ -74,6 +74,16 @@ spec:
                 value: "0"
               - name: CELERY_WORKER_CANCEL_LONG_RUNNING_TASKS_ON_CONNECTION_LOSS
                 value: "true"
+              # Un Job k8s (completions=1) si aspetta che il container
+              # termini da sé a lavoro fatto: "celery worker" di per sé
+              # resta vivo in ascolto sulla coda anche a task finito, e il
+              # pod resterebbe "Running" fino ad activeDeadlineSeconds
+              # (marcato Failed/DeadlineExceeded anche a successo). Con
+              # questa variabile (letta in worker_entry.py) il worker si
+              # arresta da solo (SIGTERM graceful) dopo un task — coerente
+              # con un job per pod, uno per messaggio in coda.
+              - name: DIADEMA_WORKER_MAX_TASKS
+                value: "1"
             # Nessun "args" qui: il CMD dell'immagine (Dockerfile) include già
             # --queues=diadema_mriqc e --concurrency=1. L'immagine ha
             # ENTRYPOINT [] (vuoto) — un "args" qui sostituirebbe l'intero CMD

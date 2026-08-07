@@ -31,6 +31,11 @@ services:
       REQUESTS_CA_BUNDLE: /etc/diadema/certs/ca.crt
       DIADEMA_MRIQC_OUTPUT_DIR: /data/diadema/mriqc
       PYTHONUNBUFFERED: "1"
+      # Stesso comportamento del pod k8s reale (scaledjob-mriqc.yaml): il
+      # worker si arresta da solo dopo un task invece di restare in ascolto
+      # indefinitamente — coerente con "restart: no" qui sotto, per testare
+      # in locale il ciclo di vita one-shot prima di affidarsi al cluster.
+      DIADEMA_WORKER_MAX_TASKS: "1"
     volumes:
       - external_mriqc_output:/data/diadema/mriqc
       # Estratto con: docker compose -f ../../full/docker-compose.yml cp nginx:/etc/nginx/certs/ca.crt ./ca.crt

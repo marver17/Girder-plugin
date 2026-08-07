@@ -36,6 +36,37 @@ def _patch_gw_signals():
     except ImportError:
         return
 
+    # gw_task_success (signal task_success, girder_worker/app.py) chiama
+    # is_revoked(sender) PRIMA di impostare lo stato SUCCESS del Job, per
+    # distinguere un completamento normale da una cancellazione. is_revoked
+    # usa il meccanismo di controllo remoto di Celery (app.control.inspect,
+    # richiede l'exchange "reply.celery.pidbox"), a cui l'utente RabbitMQ
+    # remoto non ha accesso per design (permessi ristretti alla sola coda
+    # offloadata). L'AccessRefused che ne risulta non è né AttributeError
+    # né StateTransitionException — gw_task_success non lo cattura — quindi
+    # l'eccezione esce prima di raggiungere _update_status(..., SUCCESS): il
+    # Job Girder resta bloccato a RUNNING(2) per sempre anche a task
+    # completato con successo (causa isolata con un job MRIQC reale sul
+    # cluster K8s). gw_task_failure non ha questo problema (non chiama
+    # is_revoked), infatti i task falliti transitano correttamente a ERROR.
+    # Fix: sovrascrivere l'attributo is_revoked sul modulo girder_worker.app
+    # (dove gw_task_success/gw_task_failure lo risolvono come nome globale a
+    # runtime) con una versione che tratta un fallimento del controllo
+    # remoto come "non revocato" invece di propagare l'eccezione.
+    original_is_revoked = getattr(_gw_app, "is_revoked", None)
+    if original_is_revoked:
+        def safe_is_revoked(task):
+            try:
+                return original_is_revoked(task)
+            except Exception as e:
+                logger.warning(
+                    "[diadema_pipeline] is_revoked fallito (pidbox non "
+                    "accessibile), assumo non revocato: %s", e,
+                )
+                return False
+
+        _gw_app.is_revoked = safe_is_revoked
+
     original_prerun = getattr(_gw_app, "gw_task_prerun", None)
     if original_prerun:
         task_prerun.disconnect(original_prerun)

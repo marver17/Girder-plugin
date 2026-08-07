@@ -121,9 +121,17 @@ def _apply_conf_overrides(app):
     # doppia esecuzione in caso di ri-consegna.
     app.conf.task_acks_late = True
     app.conf.task_reject_on_worker_lost = True
-    # I task non producono un "result" Celery utile (lo stato vive in
-    # item.diadema), quindi evitiamo scritture inutili sul result backend.
-    app.conf.task_ignore_result = True
+    # NON impostare task_ignore_result=True: girder_worker si appoggia allo
+    # stato del task tracciato da Celery (AsyncResult) per decidere quando
+    # inviare a Girder la PUT finale che chiude il Job (SUCCESS/ERROR). Con
+    # ignore_result=True quello stato non viene mai salvato da nessuna parte
+    # (nemmeno in locale) e la PUT finale non parte mai: il Job Girder resta
+    # bloccato a RUNNING(2) per sempre anche a task riuscito (verificato con
+    # un job reale sul cluster K8s dopo aver introdotto ignore_result=True
+    # per errore in un fix precedente). Il backend "cache+memory://" (vedi
+    # CELERY_RESULT_BACKEND) è già sufficiente a evitare scritture AMQP sul
+    # result backend verso l'exchange "amq.default" ristretto: non serve
+    # anche disattivare il tracking del risultato.
 
 
 class DiademaWorkerPlugin:

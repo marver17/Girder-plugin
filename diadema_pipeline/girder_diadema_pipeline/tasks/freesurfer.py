@@ -203,7 +203,6 @@ def _collect_stats(subject_dir):
     bind=True,
     acks_late=True,
     reject_on_worker_lost=True,
-    ignore_result=True,
     name="girder_diadema_pipeline.tasks.upload_freesurfer_results",
 )
 def upload_freesurfer_results(task, **kwargs):
@@ -401,7 +400,6 @@ def upload_freesurfer_results(task, **kwargs):
     bind=True,
     acks_late=True,
     reject_on_worker_lost=True,
-    ignore_result=True,
     name="girder_diadema_pipeline.tasks.run_freesurfer_task",
 )
 def run_freesurfer_task(task, **kwargs):

@@ -74,7 +74,10 @@ kubectl apply -f wireguard-gateway.yaml
 
 kubectl -n diadema-remote create secret generic diadema-remote-rabbitmq \
   --from-literal=CELERY_BROKER_URL="amqps://<REMOTE_WORKER_USER>:<REMOTE_WORKER_PASS>@wireguard-gateway.diadema-remote.svc.cluster.local:5671//" \
-  --from-literal=CELERY_RESULT_BACKEND="rpc://"
+  --from-literal=CELERY_RESULT_BACKEND="cache+memory://"
+  # NON "rpc://": richiede diritti sull'exchange "amq.default", negati
+  # all'utente RabbitMQ ristretto — causava AccessRefused e Job Girder
+  # bloccato a RUNNING(2) anche a job completato (vedi secret.example.yaml).
 kubectl -n diadema-remote create secret generic diadema-remote-ca \
   --from-file=ca.crt=./ca.crt   # estratto da: docker compose -f ../full/docker-compose.yml cp nginx:/etc/nginx/certs/ca.crt ./ca.crt
 

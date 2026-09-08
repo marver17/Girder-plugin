@@ -14,10 +14,15 @@ export default defineConfig({
             fileName: 'diadema-pipeline',
         },
         rollupOptions: {
+            // jquery è esterno come in nifti_viewer: le modali usano i plugin
+            // jQuery registrati da Girder/Bootstrap (.girderModal, .modal), che
+            // vivono sull'istanza globale. Bundlarne una copia darebbe un
+            // oggetto senza quei metodi.
             external: [
                 /^@girder\/.*/,
                 'backbone',
                 'underscore',
+                'jquery',
             ],
             output: {
                 globals: (id) => {
@@ -29,6 +34,7 @@ export default defineConfig({
                         '@girder/core': 'girder',
                         'backbone':     'Backbone',
                         'underscore':   '_',
+                        'jquery':       'jQuery',
                     };
                     return globalMap[id] || id;
                 },

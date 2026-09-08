@@ -16,6 +16,7 @@ import './routes';
 
 import DiademaPanel      from './views/DiademaPanel';
 import DiademaResultsWidget from './views/ResultsWidget';
+import BatchPanel        from './views/BatchPanel';
 
 // ── 1a. Inietta il pannello nella Item View (item singolo) ─────────────────────
 wrap(ItemView, 'render', function (render) {
@@ -45,20 +46,37 @@ wrap(ItemView, 'render', function (render) {
 // race condition con g:hierarchy.route (entrambi scattano per URL diretta).
 //
 // Route format: "collection/{id}/folder/{folderId}" o "folder/{id}/folder/{folderId}"
-let _sessionMountInFlight = false;
+let _mountInFlight = false;
+
+// Riferimento al pannello batch attualmente montato (serve a smontarlo
+// correttamente: è una View Backbone, non solo del DOM da rimuovere).
+let _batchPanel = null;
+
+function _removeSessionPanel() {
+    $('.g-diadema-panel[data-diadema-mode="session"]').remove();
+}
+
+function _removeBatchPanel() {
+    if (_batchPanel) {
+        _batchPanel.remove();     // ferma anche il polling del monitor
+        _batchPanel = null;
+    }
+    $('.g-diadema-panel[data-diadema-mode="batch"]').remove();
+}
 
 events.on('g:hierarchy.route', function ({ route }) {
     const match = (route || '').match(/folder\/([a-f0-9]{24})$/);
     if (!match) {
-        _sessionMountInFlight = false;
-        $('.g-diadema-panel[data-diadema-mode="session"]').remove();
+        _mountInFlight = false;
+        _removeSessionPanel();
+        _removeBatchPanel();
         return;
     }
     const folderId = match[1];
 
     // Evita chiamate REST parallele (l'evento scatta a volte due volte di fila)
-    if (_sessionMountInFlight) return;
-    _sessionMountInFlight = true;
+    if (_mountInFlight) return;
+    _mountInFlight = true;
 
     // Risale la gerarchia (max 2 livelli) finché non trova ses-XX / sub-XX,
     // poi verifica che la sessione contenga davvero almeno un item NIfTI
@@ -68,13 +86,15 @@ events.on('g:hierarchy.route', function ({ route }) {
     _findSessionAncestor(folderId)
         .then(({ sessionId, sessionName }) => {
             if (!sessionId) {
-                _sessionMountInFlight = false;
-                $('.g-diadema-panel[data-diadema-mode="session"]').remove();
-                return;
+                // Non siamo in una sessione: può essere una radice batch
+                // (dataset root o sub-XX). I due pannelli sono mutuamente
+                // esclusivi.
+                _removeSessionPanel();
+                return _tryMountBatchPanel(folderId);
             }
-            DiademaPanel._folderHasNiftiItems(sessionId)
+            _removeBatchPanel();
+            return DiademaPanel._folderHasNiftiItems(sessionId)
                 .then(hasNifti => {
-                    _sessionMountInFlight = false;
                     const existing = $('.g-diadema-panel[data-diadema-mode="session"]');
                     if (hasNifti) {
                         if (existing.data('diadema-id') === sessionId) return;
@@ -83,11 +103,60 @@ events.on('g:hierarchy.route', function ({ route }) {
                     } else {
                         existing.remove();
                     }
-                })
-                .catch(() => { _sessionMountInFlight = false; });
+                });
         })
-        .catch(() => { _sessionMountInFlight = false; });
+        .then(() => { _mountInFlight = false; })
+        .catch(() => { _mountInFlight = false; });
 });
+
+/**
+ * Monta il pannello batch se la cartella è una radice valida:
+ *   - una cartella sub-XX, oppure
+ *   - la radice di un dataset BIDS (contiene dataset_description.json).
+ * In caso contrario rimuove un eventuale pannello batch precedente.
+ */
+function _tryMountBatchPanel(folderId) {
+    return restRequest({ method: 'GET', url: `folder/${folderId}` })
+        .then(folder => {
+            const name = folder.name || '';
+            const isSubject = /^sub[-_][a-zA-Z0-9]+$/i.test(name);
+            if (isSubject) return { folder, mount: true };
+
+            // Radice dataset: la si riconosce da dataset_description.json.
+            return restRequest({
+                method: 'GET',
+                url: 'item',
+                data: { folderId, name: 'dataset_description.json', limit: 1 },
+                error: null,
+            }).then(items => ({ folder, mount: (items || []).length > 0 }))
+              .catch(() => ({ folder, mount: false }));
+        })
+        .then(({ folder, mount }) => {
+            const existing = $('.g-diadema-panel[data-diadema-mode="batch"]');
+            if (!mount) {
+                _removeBatchPanel();
+                return;
+            }
+            // Già montato sulla stessa cartella: non rifare la scansione.
+            if (_batchPanel && existing.data('diadema-id') === folder._id) return;
+            _removeBatchPanel();
+            _mountBatchPanel(folder);
+        })
+        .catch(() => { _removeBatchPanel(); });
+}
+
+function _mountBatchPanel(folder) {
+    const $anchor = $('.g-hierarchy-widget').first();
+    if (!$anchor.length) return;
+
+    _batchPanel = new BatchPanel({
+        parentView: null,
+        rootFolderId: folder._id,
+        rootFolderName: folder.name || '',
+    });
+    $anchor.before(_batchPanel.$el);
+    _batchPanel.render();
+}
 
 /**
  * Cerca la cartella ses-XX più vicina risalendo la gerarchia BIDS.

@@ -31,8 +31,14 @@ class DiademaPlugin(GirderPlugin):
         )  # registra validatori e default  # noqa: F401
         from .widget_provider import DiademaWidgetProvider
 
+        from .models.batch import DiademaBatch
+
         # Esponi il campo diadema (tutti i dati di elaborazione) via REST
         Item().exposeFields(level=AccessType.READ, fields={"diadema"})
+
+        # Istanzia il modello batch al load: è qui che initialize() crea gli
+        # indici e registra exposeFields, non alla prima richiesta REST.
+        DiademaBatch()
 
         info["apiRoot"].diadema_pipeline = DiademaResource()
 

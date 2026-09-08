@@ -9,6 +9,7 @@ import os
 import re
 import shlex
 
+from bson import ObjectId
 from girder.api import access
 from girder.api.describe import Description, autoDescribeRoute
 from girder.api.rest import Resource, filtermodel, getApiUrl, getCurrentToken
@@ -21,6 +22,13 @@ from girder.models.setting import Setting
 from girder.models.token import Token
 from girder_jobs.constants import JobStatus
 from girder_jobs.models.job import Job
+
+from .models.batch import (
+    DISPATCH_FAILED,
+    DISPATCH_QUEUED,
+    DISPATCH_SKIPPED,
+    DiademaBatch,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -157,6 +165,7 @@ def _worker_callback_url() -> str:
 # pannello sessione (e viceversa), lasciando i due punti di vista disallineati.
 
 _SESSION_FOLDER_NAME_RE = re.compile(r"^ses[-_][a-zA-Z0-9]+$", re.IGNORECASE)
+_SUBJECT_FOLDER_NAME_RE = re.compile(r"^sub[-_][a-zA-Z0-9]+$", re.IGNORECASE)
 # Stati terminali gestiti puntualmente dai task (risultati per-item specifici,
 # es. metriche MRIQC per modalità): un fan-out generico li sovrascriverebbe
 # con un risultato di sessione privo di dettaglio, quindi non li propaghiamo qui.
@@ -275,6 +284,297 @@ def _internal_api_url() -> str:
     return os.environ.get("GIRDER_INTERNAL_API_URL", "http://localhost:8080/api/v1")
 
 
+# ── Batch multi-soggetto ─────────────────────────────────────────────────────
+# Un batch è un fan-out: una sola richiesta HTTP genera N run di sessione
+# indipendenti (N Girder Job + N task Celery). Non esiste un "task batch" lato
+# worker; il documento batch registra solo *cosa* è stato lanciato, mentre
+# l'unica fonte di verità sull'avanzamento resta folder.diadema.<tool>.status,
+# esattamente come per una run singola.
+
+# Tetto per singola richiesta: impedisce che un click riempia la coda con
+# migliaia di messaggi (i pod KEDA vengono creati uno per messaggio).
+_MAX_BATCH_TARGETS = 200
+
+# Profondità massima di discesa dataset → sub-XX → (datatype) → ses-XX.
+_BATCH_MAX_DEPTH = 4
+
+
+def _count_by(rows, key):
+    """Conteggio per valore di una chiave (i None diventano 'unknown')."""
+    counts = {}
+    for row in rows:
+        value = row.get(key) or "unknown"
+        counts[value] = counts.get(value, 0) + 1
+    return counts
+
+
+def _list_batch_targets(root_folder, user, max_depth=_BATCH_MAX_DEPTH):
+    """Elenca le sessioni BIDS analizzabili sotto una cartella.
+
+    Scende ricorsivamente da `root_folder` (dataset root o sub-XX) cercando le
+    cartelle 'ses-XX'. Una sessione è un target valido solo se contiene almeno
+    un item NIfTI: il nome da solo non basta, una ses-XX vuota non ha nulla su
+    cui far girare una pipeline (stessa regola di _folderHasNiftiItems lato
+    client). Vengono considerate solo le cartelle su cui l'utente ha permesso
+    di scrittura, perché è quello che il lancio richiederà poi davvero.
+
+    Ritorna una lista di dict ordinata per (subject_label, session_label).
+    """
+    targets = []
+
+    def _descend(folder, depth, trail):
+        name = folder.get("name") or ""
+        subject = trail.get("subject")
+        if _SUBJECT_FOLDER_NAME_RE.match(name):
+            subject = name
+
+        if _SESSION_FOLDER_NAME_RE.match(name):
+            # Sessione: non si scende oltre, gli item interni sono il payload.
+            if Folder().hasAccess(folder, user, AccessType.WRITE):
+                nifti_count = len(_list_session_nifti_items(folder))
+                if nifti_count:
+                    targets.append({
+                        "folder_id": str(folder["_id"]),
+                        "subject_label": subject,
+                        "session_label": name,
+                        "path": "/".join(filter(None, [subject, name])),
+                        "nifti_count": nifti_count,
+                    })
+            return
+
+        if depth <= 0:
+            return
+        for sub in Folder().find(
+            {"parentId": folder["_id"], "parentCollection": "folder"}
+        ):
+            _descend(sub, depth - 1, {"subject": subject})
+
+    _descend(root_folder, max_depth, {"subject": None})
+    targets.sort(key=lambda t: (t["subject_label"] or "", t["session_label"] or ""))
+    return targets
+
+
+def _is_dataset_root(folder):
+    """True se la cartella contiene dataset_description.json (radice BIDS)."""
+    return (
+        Item().findOne({"folderId": folder["_id"], "name": "dataset_description.json"})
+        is not None
+    )
+
+
+# Tipi dei parametri di run. Nella route di sessione la coercizione la fa
+# autoDescribeRoute (dataType=...); il batch riceve invece un JSON grezzo, dove
+# i valori provenienti dagli <input> sono stringhe. Senza questa tabella
+# _validate_threshold confronterebbe un float con una stringa.
+_RUN_PARAM_TYPES = {
+    "timeout": int,
+    "fsTimeout": int,
+    "openmpThreads": int,
+    "threshold": float,
+    "keepWorkDir": bool,
+    "mprage": bool,
+    "wsatlas": bool,
+    "deface": bool,
+    "noIsrunning": bool,
+    "keepSubjectsDir": bool,
+    "useGpu": bool,
+}
+
+_TRUTHY = ("true", "1", "yes", "on")
+
+
+def _coerce_run_params(p):
+    """Converte i parametri di run ai tipi attesi dai task.
+
+    I valori non convertibili sollevano 400 invece di propagarsi fino al worker
+    come stringa e far fallire il task a metà pipeline.
+    """
+    out = dict(p)
+    for name, caster in _RUN_PARAM_TYPES.items():
+        if name not in out or out[name] is None or out[name] == "":
+            continue
+        value = out[name]
+        if caster is bool:
+            out[name] = (
+                value if isinstance(value, bool)
+                else str(value).strip().lower() in _TRUTHY
+            )
+            continue
+        try:
+            out[name] = caster(value)
+        except (TypeError, ValueError):
+            raise RestException(
+                f"Valore non valido per {name}: {value!r} "
+                f"(atteso {caster.__name__})", 400
+            )
+    return out
+
+
+def _validate_run_params(user, p):
+    """Valida i parametri di run comuni a sessione singola e batch.
+
+    `p` è il dict dei parametri grezzi; solleva RestException(400/403).
+    """
+    _validate_participant_label(p.get("participantLabel"))
+    _validate_choice(p.get("modality"), _ALLOWED_MODALITIES, "modality")
+    _validate_choice(p.get("directive"), _ALLOWED_DIRECTIVES, "directive")
+    _validate_choice(p.get("hemi"), _ALLOWED_HEMI, "hemi")
+    _validate_output_dir(p.get("outputBaseDir"), "outputBaseDir")
+    _validate_output_dir(p.get("subjectsDir"), "subjectsDir")
+    _validate_extra_flags(p.get("extraFlags"), user)
+    _validate_threshold(p.get("threshold"))
+
+
+def _build_session_task_kwargs(folder_id, tool_id, p):
+    """Costruisce (celery_task, task_kwargs) per una run di sessione.
+
+    Estratto da runSessionTool per essere riusato identico dal batch: i default
+    dei PluginSettings vanno applicati in un solo posto, altrimenti batch e run
+    singola divergono silenziosamente sulle directory di output.
+    """
+    from .settings import PluginSettings
+
+    if tool_id == "mriqc":
+        from .tasks import run_mriqc_task as celery_task
+
+        # selectedFileIds: CSV di file ID → override auto-detect (es. "id1,id2")
+        selected_ids = [
+            f.strip() for f in (p.get("selectedFileIds") or "").split(",") if f.strip()
+        ]
+        task_kwargs = dict(
+            session_folder_id=folder_id,
+            participant_label=p.get("participantLabel") or "",
+            modality_filter=p.get("modality") or "",
+            selected_file_ids=selected_ids or None,
+            timeout=p.get("timeout"),
+            output_base_dir=(
+                p.get("outputBaseDir")
+                or Setting().get(PluginSettings.MRIQC_OUTPUT_DIR)
+                or None
+            ),
+            keep_work_dir=p.get("keepWorkDir"),
+            derivatives_root_id=p.get("derivativesRootId") or None,
+        )
+    elif tool_id == "freesurfer":
+        from .tasks import run_freesurfer_task as celery_task
+
+        task_kwargs = dict(
+            session_folder_id=folder_id,
+            participant_label=p.get("participantLabel") or "",
+            override_t1w_file_id=p.get("t1wFileId") or None,
+            override_t2w_file_id=p.get("t2wFileId") or None,
+            directive=p.get("directive"),
+            hemi=p.get("hemi"),
+            openmp_threads=p.get("openmpThreads"),
+            mprage=p.get("mprage"),
+            wsatlas=p.get("wsatlas"),
+            deface=p.get("deface"),
+            no_isrunning=p.get("noIsrunning"),
+            extra_flags=p.get("extraFlags"),
+            subjects_dir=(
+                p.get("subjectsDir")
+                or Setting().get(PluginSettings.SUBJECTS_DIR)
+                or None
+            ),
+            keep_subjects_dir=p.get("keepSubjectsDir"),
+            timeout=p.get("fsTimeout"),
+            derivatives_root_id=p.get("derivativesRootId") or None,
+        )
+    else:  # lstai
+        from .tasks import run_lstai_task as celery_task
+
+        task_kwargs = dict(
+            session_folder_id=folder_id,
+            participant_label=p.get("participantLabel") or "",
+            override_t1w_file_id=p.get("t1wFileId") or None,
+            override_flair_file_id=p.get("flairFileId") or None,
+            threshold=p.get("threshold"),
+            use_gpu=p.get("useGpu"),
+            output_base_dir=Setting().get(PluginSettings.LSTAI_OUTPUT_DIR) or None,
+        )
+
+    return celery_task, task_kwargs
+
+
+def _claim_session(folder, tool_id, force):
+    """Claim atomico dello stato 'queued' su una sessione (anti double-run).
+
+    Ritorna (True, None) se il claim è riuscito, (False, stato_corrente) se un
+    job era già attivo. A differenza della run singola non solleva 409: il
+    chiamante decide se è un errore (run singola) o uno skip (batch).
+    """
+    if force:
+        Folder().update(
+            {"_id": folder["_id"]},
+            {"$set": {f"diadema.{tool_id}.status": "queued"}},
+            multi=False,
+        )
+        return True, None
+
+    res = Folder().update(
+        {
+            "_id": folder["_id"],
+            f"diadema.{tool_id}.status": {"$nin": list(_ACTIVE_STATUSES)},
+        },
+        {"$set": {f"diadema.{tool_id}.status": "queued"}},
+        multi=False,
+    )
+    if res.matched_count == 0:
+        current_status = (
+            (Folder().load(folder["_id"], force=True).get("diadema") or {})
+            .get(tool_id, {})
+            .get("status")
+        )
+        return False, current_status
+    return True, None
+
+
+def _release_session_claim(folder_id, tool_id):
+    """Rilascia il claim 'queued' dopo un dispatch fallito.
+
+    Senza questo la sessione resterebbe bloccata in 'queued' e ogni run
+    successiva verrebbe respinta con 409.
+    """
+    Folder().update(
+        {"_id": folder_id},
+        {"$set": {f"diadema.{tool_id}.status": "error"}},
+        multi=False,
+    )
+
+
+def _cancel_session_job(folder, tool_id):
+    """Porta a 'cancelling' il job attivo di un tool su una sessione.
+
+    Condiviso fra cancel singolo e cancel batch: la logica di cancellazione va
+    tenuta in un posto solo, come per la propagazione di stato.
+    Ritorna (True, job_id, None) oppure (False, motivo, http_status).
+    """
+    from bson import ObjectId
+
+    tool_data = (folder.get("diadema") or {}).get(tool_id) or {}
+    status = tool_data.get("status")
+    job_id = tool_data.get("job_id")
+
+    if status not in _ACTIVE_STATUSES:
+        return False, f"Nessun job attivo per '{tool_id}' (stato: {status})", 400
+    if not job_id:
+        return False, f"job_id non trovato per '{tool_id}'", 400
+
+    job = Job().load(ObjectId(job_id), force=True)
+    if not job:
+        return False, f"Job {job_id} non trovato", 404
+
+    # Update diretto: 824 (CANCELING) non è una transizione valida da ogni stato
+    # e girder_jobs rifiuterebbe l'updateJob.
+    Job().update({"_id": job["_id"]}, {"$set": {"status": 824}}, multi=False)
+    Folder().update(
+        {"_id": folder["_id"]},
+        {"$set": {f"diadema.{tool_id}.status": "cancelling"}},
+        multi=False,
+    )
+    return True, job_id, None
+
+
 class DiademaResource(Resource):
     def __init__(self):
         super().__init__()
@@ -300,6 +600,12 @@ class DiademaResource(Resource):
         self.route("GET", ("session", ":folderId", "results"), self.getSessionResults)
         self.route("GET", ("session", ":folderId", "participant_label"), self.resolveSessionParticipantLabel)
         self.route("GET", ("session", ":folderId", "files"), self.getSessionFiles)
+        # Batch multi-soggetto (dataset root / sub-XX)
+        self.route("GET", ("batch", "targets"), self.listBatchTargets)
+        self.route("POST", ("batch", "run", ":toolId"), self.runBatch)
+        self.route("GET", ("batch", ":batchId", "status"), self.getBatchStatus)
+        self.route("POST", ("batch", ":batchId", "cancel"), self.cancelBatch)
+        self.route("GET", ("batch",), self.listBatches)
 
     @access.user(scope=TokenScope.DATA_WRITE)
     @autoDescribeRoute(
@@ -1230,105 +1536,49 @@ class DiademaResource(Resource):
                 f"Tool non supportato: '{toolId}'. Valori ammessi: {list(_TOOL_CONFIG)}", 400
             )
 
-        # ── Validazione input utente ──────────────────────────────────────────
-        _validate_participant_label(participantLabel)
-        _validate_choice(modality, _ALLOWED_MODALITIES, "modality")
-        _validate_choice(directive, _ALLOWED_DIRECTIVES, "directive")
-        _validate_choice(hemi, _ALLOWED_HEMI, "hemi")
-        _validate_output_dir(outputBaseDir, "outputBaseDir")
-        _validate_output_dir(subjectsDir, "subjectsDir")
-        _validate_extra_flags(extraFlags, self.getCurrentUser())
-        _validate_threshold(threshold)
-        # ─────────────────────────────────────────────────────────────────────
-
-        # ── Controllo double-run: claim atomico dello stato 'queued' ──────────
-        if force:
-            Folder().update(
-                {"_id": folder["_id"]},
-                {"$set": {f"diadema.{toolId}.status": "queued"}},
-                multi=False,
-            )
-        else:
-            res = Folder().update(
-                {
-                    "_id": folder["_id"],
-                    f"diadema.{toolId}.status": {"$nin": list(_ACTIVE_STATUSES)},
-                },
-                {"$set": {f"diadema.{toolId}.status": "queued"}},
-                multi=False,
-            )
-            if res.matched_count == 0:
-                current_status = (
-                    (Folder().load(folder["_id"], force=True).get("diadema") or {})
-                    .get(toolId, {})
-                    .get("status")
-                )
-                raise RestException(
-                    f"Un job '{toolId}' è già in corso su questa sessione "
-                    f"(stato: {current_status}). Usa force=true per forzare.",
-                    409,
-                )
-        # ─────────────────────────────────────────────────────────────────────
-
-        from .settings import PluginSettings
-
-        _settings_mriqc_dir = Setting().get(PluginSettings.MRIQC_OUTPUT_DIR) or None
-        _settings_subjects_dir = Setting().get(PluginSettings.SUBJECTS_DIR) or None
-        _settings_lstai_dir = Setting().get(PluginSettings.LSTAI_OUTPUT_DIR) or None
-
-        cfg = _TOOL_CONFIG[toolId]
-
-        if toolId == "mriqc":
-            from .tasks import run_mriqc_task as celery_task
-
-            # selectedFileIds: CSV di file ID → override auto-detect (es. "id1,id2")
-            selected_ids = [f.strip() for f in (selectedFileIds or "").split(",") if f.strip()]
-            task_kwargs = dict(
-                session_folder_id=str(folder["_id"]),
-                participant_label=participantLabel,
-                modality_filter=modality or "",
-                selected_file_ids=selected_ids or None,
-                timeout=timeout,
-                output_base_dir=outputBaseDir or _settings_mriqc_dir or None,
-                keep_work_dir=keepWorkDir,
-                derivatives_root_id=derivativesRootId or None,
-            )
-        elif toolId == "freesurfer":
-            from .tasks import run_freesurfer_task as celery_task
-
-            task_kwargs = dict(
-                session_folder_id=str(folder["_id"]),
-                participant_label=participantLabel,
-                override_t1w_file_id=t1wFileId or None,
-                override_t2w_file_id=t2wFileId or None,
-                directive=directive,
-                hemi=hemi,
-                openmp_threads=openmpThreads,
-                mprage=mprage,
-                wsatlas=wsatlas,
-                deface=deface,
-                no_isrunning=noIsrunning,
-                extra_flags=extraFlags,
-                subjects_dir=subjectsDir or _settings_subjects_dir or None,
-                keep_subjects_dir=keepSubjectsDir,
-                timeout=fsTimeout,
-                derivatives_root_id=derivativesRootId or None,
-            )
-        else:  # lstai
-            from .tasks import run_lstai_task as celery_task
-
-            task_kwargs = dict(
-                session_folder_id=str(folder["_id"]),
-                participant_label=participantLabel,
-                override_t1w_file_id=t1wFileId or None,
-                override_flair_file_id=flairFileId or None,
-                threshold=threshold,
-                use_gpu=useGpu,
-                output_base_dir=_settings_lstai_dir or None,
-            )
+        run_params = dict(
+            participantLabel=participantLabel,
+            modality=modality,
+            timeout=timeout,
+            outputBaseDir=outputBaseDir,
+            keepWorkDir=keepWorkDir,
+            directive=directive,
+            hemi=hemi,
+            openmpThreads=openmpThreads,
+            mprage=mprage,
+            wsatlas=wsatlas,
+            deface=deface,
+            noIsrunning=noIsrunning,
+            extraFlags=extraFlags,
+            subjectsDir=subjectsDir,
+            keepSubjectsDir=keepSubjectsDir,
+            fsTimeout=fsTimeout,
+            threshold=threshold,
+            useGpu=useGpu,
+            derivativesRootId=derivativesRootId,
+            t1wFileId=t1wFileId,
+            t2wFileId=t2wFileId,
+            flairFileId=flairFileId,
+            selectedFileIds=selectedFileIds,
+        )
 
         current_user = self.getCurrentUser()
-        folder_id = str(folder["_id"])
+        _validate_run_params(current_user, run_params)
+
+        # ── Controllo double-run: claim atomico dello stato 'queued' ──────────
+        claimed, current_status = _claim_session(folder, toolId, force)
+        if not claimed:
+            raise RestException(
+                f"Un job '{toolId}' è già in corso su questa sessione "
+                f"(stato: {current_status}). Usa force=true per forzare.",
+                409,
+            )
+        # ─────────────────────────────────────────────────────────────────────
+
+        cfg = _TOOL_CONFIG[toolId]
+        celery_task, task_kwargs = _build_session_task_kwargs(
+            str(folder["_id"]), toolId, run_params
+        )
         soft_limit = _tool_soft_time_limit(toolId, task_kwargs)
         try:
             return self._dispatchSessionTool(
@@ -1337,11 +1587,7 @@ class DiademaResource(Resource):
             )
         except Exception:
             # Rilascia il claim 'queued' per non bloccare i run successivi
-            Folder().update(
-                {"_id": folder["_id"]},
-                {"$set": {f"diadema.{toolId}.status": "error"}},
-                multi=False,
-            )
+            _release_session_claim(folder["_id"], toolId)
             raise
 
     def _dispatchSessionTool(self, folder, toolId, cfg, current_user,
@@ -1556,29 +1802,10 @@ class DiademaResource(Resource):
         if toolId not in _TOOL_CONFIG:
             raise RestException(f"Tool non supportato: {toolId}", 400)
 
-        diadema = folder.get("diadema") or {}
-        tool_data = diadema.get(toolId) or {}
-        status = tool_data.get("status")
-        job_id = tool_data.get("job_id")
-
-        if status not in ("running", "queued", "processing", "uploading"):
-            raise RestException(f"Nessun job attivo per '{toolId}' (stato: {status})", 400)
-        if not job_id:
-            raise RestException(f"job_id non trovato per '{toolId}'", 400)
-
-        from bson import ObjectId
-
-        job = Job().load(ObjectId(job_id), force=True)
-        if not job:
-            raise RestException(f"Job {job_id} non trovato", 404)
-
-        Job().update({"_id": job["_id"]}, {"$set": {"status": 824}}, multi=False)
-        Folder().update(
-            {"_id": folder["_id"]},
-            {"$set": {f"diadema.{toolId}.status": "cancelling"}},
-            multi=False,
-        )
-        return {"cancelled": True, "job_id": job_id, "tool": toolId}
+        cancelled, detail, code = _cancel_session_job(folder, toolId)
+        if not cancelled:
+            raise RestException(detail, code)
+        return {"cancelled": True, "job_id": detail, "tool": toolId}
 
     @access.user(scope=TokenScope.DATA_WRITE)
     @autoDescribeRoute(
@@ -1614,6 +1841,331 @@ class DiademaResource(Resource):
             multi=False,
         )
         return {"reset": True, "tool": toolId, "job_id": job_id}
+
+    # ── Batch multi-soggetto ──────────────────────────────────────────────────
+
+    @access.user(scope=TokenScope.DATA_READ)
+    @autoDescribeRoute(
+        Description(
+            "Elenca le sessioni BIDS lanciabili in batch sotto una cartella "
+            "(dataset root o sub-XX). Usato dalla modale di lancio."
+        )
+        .modelParam(
+            "folderId",
+            model=Folder,
+            level=AccessType.READ,
+            destName="folder",
+            paramType="query",
+            description="ID cartella radice (dataset root o sub-XX)",
+        )
+        .param("toolId", "Tool di cui riportare lo stato corrente per target", required=True)
+        .errorResponse("Tool non supportato", 400)
+    )
+    def listBatchTargets(self, folder, toolId, params):
+        if toolId not in _TOOL_CONFIG:
+            raise RestException(f"Tool non supportato: {toolId}", 400)
+
+        user = self.getCurrentUser()
+        targets = _list_batch_targets(folder, user)
+
+        # Stato corrente per target: serve al client per disabilitare le
+        # sessioni con un job già attivo invece di farle rifiutare dal claim.
+        for target in targets:
+            tfolder = Folder().load(target["folder_id"], force=True, exc=False) or {}
+            target["status"] = (
+                ((tfolder.get("diadema") or {}).get(toolId) or {}).get("status")
+            )
+
+        return {
+            "root": {
+                "id": str(folder["_id"]),
+                "name": folder.get("name", ""),
+                "is_dataset_root": _is_dataset_root(folder),
+            },
+            "tool": toolId,
+            "max_targets": _MAX_BATCH_TARGETS,
+            "targets": targets,
+        }
+
+    @access.user(scope=TokenScope.DATA_WRITE)
+    @autoDescribeRoute(
+        Description(
+            "Avvia un tool DIADEMA su più sessioni BIDS con un'unica richiesta. "
+            "Crea N job indipendenti (uno per sessione) sulla coda del tool."
+        )
+        .param("toolId", "Tool da eseguire: mriqc | freesurfer | lstai", paramType="path")
+        .jsonParam(
+            "body",
+            "Payload batch: {rootFolderId, targets:[{folderId}], params:{...}, "
+            "force, skipCompleted}",
+            requireObject=True,
+            paramType="body",
+        )
+        .errorResponse("Tool non supportato / payload non valido / troppi target", 400)
+        .errorResponse("Cartella radice non trovata", 404)
+    )
+    def runBatch(self, toolId, body, params):
+        if toolId not in _TOOL_CONFIG:
+            raise RestException(
+                f"Tool non supportato: '{toolId}'. Valori ammessi: {list(_TOOL_CONFIG)}", 400
+            )
+
+        raw_targets = body.get("targets") or []
+        if not isinstance(raw_targets, list) or not raw_targets:
+            raise RestException("targets deve essere una lista non vuota", 400)
+        if len(raw_targets) > _MAX_BATCH_TARGETS:
+            raise RestException(
+                f"Troppi target: {len(raw_targets)} (massimo {_MAX_BATCH_TARGETS} "
+                f"per richiesta). Suddividi il batch.",
+                400,
+            )
+
+        user = self.getCurrentUser()
+        run_params = body.get("params") or {}
+        if not isinstance(run_params, dict):
+            raise RestException("params deve essere un oggetto", 400)
+
+        # I parametri sono comuni a tutti i target: si coercono e validano una
+        # volta sola, prima di mettere qualsiasi cosa in coda (nessun batch
+        # parzialmente lanciato per un valore non valido).
+        run_params = _coerce_run_params(run_params)
+        _validate_run_params(user, run_params)
+
+        root_folder = Folder().load(
+            body.get("rootFolderId"), user=user, level=AccessType.READ, exc=True
+        )
+
+        force = bool(body.get("force"))
+        skip_completed = bool(body.get("skipCompleted", True))
+        cfg = _TOOL_CONFIG[toolId]
+
+        results = []
+        for raw in raw_targets:
+            folder_id = raw.get("folderId") if isinstance(raw, dict) else raw
+            entry = {
+                "folderId": str(folder_id),
+                "subjectLabel": (raw or {}).get("subjectLabel") if isinstance(raw, dict) else None,
+                "sessionLabel": (raw or {}).get("sessionLabel") if isinstance(raw, dict) else None,
+                "path": (raw or {}).get("path") if isinstance(raw, dict) else None,
+                "jobId": None,
+                "celeryTaskId": None,
+                "dispatch": DISPATCH_SKIPPED,
+                "message": None,
+            }
+            results.append(entry)
+
+            # Permessi verificati per singolo target: un id fuori dal proprio
+            # perimetro non deve far fallire l'intero batch, va solo saltato.
+            folder = Folder().load(
+                folder_id, user=user, level=AccessType.WRITE, exc=False
+            )
+            if not folder:
+                entry["message"] = "cartella non trovata o permessi insufficienti"
+                continue
+
+            # Etichette dal server: quelle del client sono solo un suggerimento
+            # per la resa, non vanno considerate attendibili.
+            entry["sessionLabel"] = folder.get("name")
+
+            current = ((folder.get("diadema") or {}).get(toolId) or {}).get("status")
+            if skip_completed and current == "completed" and not force:
+                entry["message"] = "già completata (skipCompleted)"
+                continue
+
+            claimed, current_status = _claim_session(folder, toolId, force)
+            if not claimed:
+                entry["message"] = f"job già in corso (stato: {current_status})"
+                continue
+
+            try:
+                celery_task, task_kwargs = _build_session_task_kwargs(
+                    str(folder["_id"]), toolId, run_params
+                )
+                dispatched = self._dispatchSessionTool(
+                    folder, toolId, cfg, user, celery_task, task_kwargs,
+                    soft_time_limit=_tool_soft_time_limit(toolId, task_kwargs),
+                )
+            except Exception as exc:
+                # Un target che esplode non deve abortire i restanti: si
+                # rilascia il claim e si prosegue.
+                logger.exception(
+                    "[diadema] batch %s: dispatch fallito su folder %s", toolId, folder_id
+                )
+                _release_session_claim(folder["_id"], toolId)
+                entry["dispatch"] = DISPATCH_FAILED
+                entry["message"] = str(exc)
+                continue
+
+            entry["dispatch"] = DISPATCH_QUEUED
+            entry["jobId"] = dispatched["job_id"]
+            entry["celeryTaskId"] = dispatched["celery_task_id"]
+
+        batch = DiademaBatch().createBatch(
+            creator=user,
+            tool_id=toolId,
+            root_folder=root_folder,
+            params=run_params,
+            targets=results,
+        )
+        batch_id = str(batch["_id"])
+
+        # Retro-link sui Job: permette di risalire al batch dalla vista Jobs di
+        # Girder e serve a cancelBatch.
+        for entry in results:
+            if entry["jobId"]:
+                Job().update(
+                    {"_id": ObjectId(entry["jobId"])},
+                    {"$set": {"diademaBatchId": batch_id}},
+                    multi=False,
+                )
+
+        counts = _count_by(results, "dispatch")
+        return {
+            "batch_id": batch_id,
+            "tool": toolId,
+            "queued": counts.get(DISPATCH_QUEUED, 0),
+            "skipped": counts.get(DISPATCH_SKIPPED, 0),
+            "failed": counts.get(DISPATCH_FAILED, 0),
+            "targets": results,
+        }
+
+    @access.user(scope=TokenScope.DATA_READ)
+    @autoDescribeRoute(
+        Description(
+            "Stato aggregato di un batch: una sola richiesta al posto di N poll "
+            "per sessione."
+        ).modelParam(
+            "batchId",
+            model=DiademaBatch,
+            level=AccessType.READ,
+            destName="batch",
+            paramType="path",
+        )
+    )
+    def getBatchStatus(self, batch, params):
+        tool_id = batch["toolId"]
+        targets = batch.get("targets") or []
+
+        # Letture in blocco: una query per le folder e una per i job, non N+N.
+        folder_ids = [ObjectId(t["folderId"]) for t in targets if t.get("folderId")]
+        folders = {
+            str(f["_id"]): f
+            for f in Folder().find({"_id": {"$in": folder_ids}})
+        }
+        job_ids = [ObjectId(t["jobId"]) for t in targets if t.get("jobId")]
+        jobs = {
+            str(j["_id"]): j
+            for j in (Job().find({"_id": {"$in": job_ids}}) if job_ids else [])
+        }
+
+        out_targets = []
+        for target in targets:
+            folder = folders.get(target["folderId"])
+            status = (
+                ((folder.get("diadema") or {}).get(tool_id) or {}).get("status")
+                if folder else None
+            )
+            if not status:
+                # Target mai lanciato (skipped/failed): l'esito del dispatch è
+                # l'unico stato che abbia senso mostrare.
+                status = target.get("dispatch")
+
+            job = jobs.get(target.get("jobId") or "")
+            out_targets.append({
+                "folderId": target["folderId"],
+                "subjectLabel": target.get("subjectLabel"),
+                "sessionLabel": target.get("sessionLabel"),
+                "path": target.get("path"),
+                "jobId": target.get("jobId"),
+                "dispatch": target.get("dispatch"),
+                "status": status,
+                "message": target.get("message"),
+                "progress": (job or {}).get("progress"),
+            })
+
+        summary = _count_by(out_targets, "status")
+        summary["total"] = len(out_targets)
+        done = not any(
+            t["status"] in _ACTIVE_STATUSES or t["status"] == "cancelling"
+            for t in out_targets
+        )
+
+        return {
+            "batch_id": str(batch["_id"]),
+            "tool": tool_id,
+            "root_folder_id": str(batch["rootFolderId"]),
+            "root_folder_name": batch.get("rootFolderName", ""),
+            "created": batch.get("created"),
+            "params": batch.get("params") or {},
+            "summary": summary,
+            "done": done,
+            "targets": out_targets,
+        }
+
+    @access.user(scope=TokenScope.DATA_WRITE)
+    @autoDescribeRoute(
+        Description("Annulla tutti i job ancora attivi di un batch").modelParam(
+            "batchId",
+            model=DiademaBatch,
+            level=AccessType.WRITE,
+            destName="batch",
+            paramType="path",
+        )
+    )
+    def cancelBatch(self, batch, params):
+        tool_id = batch["toolId"]
+        user = self.getCurrentUser()
+        cancelled, skipped = [], []
+
+        for target in batch.get("targets") or []:
+            folder = Folder().load(
+                target["folderId"], user=user, level=AccessType.WRITE, exc=False
+            )
+            if not folder:
+                skipped.append({"folderId": target["folderId"], "reason": "permessi insufficienti"})
+                continue
+            ok, detail, _code = _cancel_session_job(folder, tool_id)
+            if ok:
+                cancelled.append({"folderId": target["folderId"], "jobId": detail})
+            else:
+                skipped.append({"folderId": target["folderId"], "reason": detail})
+
+        return {
+            "batch_id": str(batch["_id"]),
+            "cancelled": len(cancelled),
+            "skipped": len(skipped),
+            "details": {"cancelled": cancelled, "skipped": skipped},
+        }
+
+    @access.user(scope=TokenScope.DATA_READ)
+    @autoDescribeRoute(
+        Description("Elenca i batch DIADEMA dell'utente corrente")
+        .param("rootFolderId", "Filtra per cartella radice", required=False, default="")
+        .param("limit", "Numero massimo di batch", required=False, dataType="integer", default=20)
+    )
+    def listBatches(self, rootFolderId, limit, params):
+        user = self.getCurrentUser()
+        query = {"creatorId": user["_id"]}
+        if rootFolderId:
+            try:
+                query["rootFolderId"] = ObjectId(rootFolderId)
+            except Exception:
+                raise RestException(f"rootFolderId non valido: {rootFolderId}", 400)
+
+        batches = DiademaBatch().find(
+            query, limit=int(limit), sort=[("created", -1)]
+        )
+        return [
+            {
+                "batch_id": str(b["_id"]),
+                "tool": b["toolId"],
+                "root_folder_id": str(b["rootFolderId"]),
+                "root_folder_name": b.get("rootFolderName", ""),
+                "created": b.get("created"),
+                "targets_count": len(b.get("targets") or []),
+            }
+            for b in batches
+        ]
 
     # ── Settings endpoints ────────────────────────────────────────────────────
 

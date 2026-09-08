@@ -17,16 +17,10 @@ import MriqcTool     from './tools/mriqc';
 import FreesurferTool from './tools/freesurfer';
 import LstaiTool     from './tools/lstai';
 
-const TOOLS = [MriqcTool, FreesurferTool, LstaiTool];
+import { renderParamForm, buildParamFieldHTML } from './paramForm';
+import { STATUS_CLASSES } from './status';
 
-// ── Mappa id → status text e classe Bootstrap ─────────────────────────────────
-const STATUS_CLASSES = {
-    completed:  { cls: 'success', text: '✓' },
-    processing: { cls: 'warning', text: '…' },
-    running:    { cls: 'warning', text: '…' },
-    queued:     { cls: 'info',    text: '⏳' },
-    error:      { cls: 'danger',  text: '✗' },
-};
+const TOOLS = [MriqcTool, FreesurferTool, LstaiTool];
 
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -297,10 +291,7 @@ const DiademaPanel = {
             ? DiademaPanel._inferMRIQCParams(model)
             : {};
 
-        const fields = tool.params.map(param => {
-            const value = autoValues[param.name] !== undefined ? autoValues[param.name] : param.default;
-            return DiademaPanel._buildParamFieldHTML(param, value);
-        }).join('');
+        const fields = renderParamForm(tool, { values: autoValues });
 
         // Banner preview percorso derivatives (solo MRIQC)
         const derivativesPreview = (tool.id === 'mriqc') ? `
@@ -569,56 +560,10 @@ const DiademaPanel = {
         });
     },
 
+    // Delega al generatore condiviso (views/paramForm.js), usato anche dalla
+    // modale di lancio batch. Mantenuto come metodo per non rompere i chiamanti.
     _buildParamFieldHTML(param, currentValue) {
-        const id = `g-diadema-param-${param.name}`;
-        let inputHtml = '';
-
-        if (param.type === 'select') {
-            const opts = param.options.map(opt =>
-                `<option value="${opt.value}" ${opt.value === currentValue ? 'selected' : ''}>${opt.label}</option>`
-            ).join('');
-            inputHtml = `<select class="form-control input-sm" id="${id}" data-param="${param.name}">${opts}</select>`;
-
-        } else if (param.type === 'checkbox') {
-            inputHtml = `
-                <div class="checkbox" style="margin: 0;">
-                    <label>
-                        <input type="checkbox" id="${id}" data-param="${param.name}"
-                               ${currentValue ? 'checked' : ''}>
-                        ${param.label}
-                    </label>
-                </div>`;
-            // Per checkbox saltiamo il wrapper standard
-            return `
-                <div class="form-group" style="margin-bottom: 8px;">
-                    <div class="col-sm-4"></div>
-                    <div class="col-sm-8">
-                        ${inputHtml}
-                        ${param.hint ? `<small class="text-muted">${param.hint}</small>` : ''}
-                    </div>
-                </div>`;
-
-        } else {
-            // text o number
-            const extras = param.type === 'number'
-                ? `min="${param.min ?? ''}" max="${param.max ?? ''}" step="${param.step ?? 1}"`
-                : '';
-            inputHtml = `<input type="${param.type}" class="form-control input-sm"
-                                id="${id}" data-param="${param.name}"
-                                value="${currentValue}" ${extras}>`;
-        }
-
-        return `
-            <div class="form-group" style="margin-bottom: 8px;">
-                <label class="col-sm-4 control-label" for="${id}"
-                       style="font-weight: normal; padding-top: 4px; font-size: 12px;">
-                    ${param.label}
-                </label>
-                <div class="col-sm-8">
-                    ${inputHtml}
-                    ${param.hint ? `<small class="text-muted" style="font-size: 11px;">${param.hint}</small>` : ''}
-                </div>
-            </div>`;
+        return buildParamFieldHTML(param, currentValue);
     },
 
     // ── Raccoglie i valori dal form (o defaults se chiuso) ────────────────────

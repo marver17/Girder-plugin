@@ -1,5 +1,11 @@
-# Pinned: digest dell'immagine MRIQC v25.1.0.dev45 attualmente deployata
+# Pinned: digest dell'immagine MRIQC v25.1.0.dev45 attualmente deployata in produzione (amd64)
 # ("latest" non è riproducibile e può rompere la compatibilità al rebuild)
+#
+# Nota architettura: questo digest è esplicitamente linux/amd64. Se buildando su ARM64:
+# - Per deployment amd64 (produzione): usare `docker buildx build --load --platform linux/amd64`
+#   (richiede QEMU, ma la base MRIQC ha limitazioni che lo rendono inaffidabile)
+# - Alternativa: buildare in container amd64 esterno, o usare GitHub Actions per CI/CD
+# - Per deployment ARM64 (test): usare il digest senza modifiche e Docker tirerà la variante ARM64
 FROM nipreps/mriqc@sha256:e4b8800c8fb716dc81ae6c7cf2009b4da09eec8ae3caba8aa2083ed4fa94d100
 
 # Install git
